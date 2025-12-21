@@ -46,7 +46,7 @@ def health():
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
         "proxy": "web_unlocker1",
-        "version": "5.0-ip-rotation",
+        "version": "5.1-ip-rotation-5retries",
         "features": ["session-based-rotation", "retry-on-failure"]
     })
 
@@ -124,7 +124,7 @@ async def extract_hero_images(page):
 
     return hero_images
 
-async def scrape_with_retry(url, max_retries=3):
+async def scrape_with_retry(url, max_retries=5):
     """Scrape a page with retry logic and IP rotation on failure"""
     last_error = None
 
@@ -225,7 +225,7 @@ def scrape_endpoint():
             })
 
         # Scrape with retry and IP rotation
-        result = run_async(scrape_with_retry(url, max_retries=3))
+        result = run_async(scrape_with_retry(url, max_retries=5))
         return jsonify(result)
 
     except Exception as e:
@@ -246,7 +246,7 @@ def scrape_single_endpoint():
         cached = get_cached_result(url)
         if not cached:
             # Scrape if not cached
-            cached = run_async(scrape_with_retry(url, max_retries=3))
+            cached = run_async(scrape_with_retry(url, max_retries=5))
 
         if not cached.get("success"):
             return jsonify(cached)
