@@ -3,6 +3,7 @@ import json
 import asyncio
 import logging
 import base64
+import re
 from flask import Flask, request, jsonify
 from playwright.async_api import async_playwright
 
@@ -22,60 +23,152 @@ def health():
 async def get_all_property_images(page, url):
     """
     Extract all property images from the page in order from top to bottom.
-    Returns a list of image URLs.
+    Includes: img tags, background images, picture/source elements, lazy-loaded images.
     """
     
     # Wait for page to fully render
-    await asyncio.sleep(3)
+    await asyncio.sleep(5)
     
-    # Extract all images that could be property photos
+    # Scroll down a bit to trigger lazy loading
+    await page.evaluate('window.scrollBy(0, 500)')
+    await asyncio.sleep(2)
+    await page.evaluate('window.scrollTo(0, 0)')
+    await asyncio.sleep(1)
+    
+    # Extract all images including background images and picture elements
     images = await page.evaluate('''
         () => {
             const results = [];
             const seen = new Set();
             
-            // Get ALL images on the page in DOM order (top to bottom)
-            const allImgs = document.querySelectorAll('img');
-            
-            for (const img of allImgs) {
-                const url = img.src || img.dataset.src || '';
+            // Helper to add image if valid
+            function addImage(url, source, top = 0) {
+                if (!url || !url.startsWith('http') || seen.has(url)) return;
                 
-                // Skip if no URL, not http, or already seen
-                if (!url || !url.startsWith('http') || seen.has(url)) continue;
-                
-                // Skip tiny images (icons, logos)
-                const w = img.naturalWidth || img.width || parseInt(img.getAttribute('width')) || 0;
-                const h = img.naturalHeight || img.height || parseInt(img.getAttribute('height')) || 0;
-                if (w > 0 && w < 100) continue;
-                if (h > 0 && h < 100) continue;
-                
-                // Skip obvious non-property images
+                // Skip tiny/icon images
                 const urlLower = url.toLowerCase();
                 if (urlLower.includes('logo') || urlLower.includes('icon') || 
                     urlLower.includes('avatar') || urlLower.includes('sprite') ||
-                    urlLower.includes('badge') || urlLower.includes('button')) continue;
+                    urlLower.includes('badge') || urlLower.includes('button') ||
+                    urlLower.includes('1x1') || urlLower.includes('pixel')) return;
                 
-                // For Redfin, only include CDN images (actual property photos)
+                // For Redfin, only include CDN images
                 const isRedfin = window.location.hostname.includes('redfin.com');
-                if (isRedfin && !url.includes('ssl.cdn-redfin.com/photo')) continue;
+                if (isRedfin && !url.includes('ssl.cdn-redfin.com/photo') && !url.includes('ssl.cdn-redfin.com/v')) return;
                 
                 // For Zillow, only include zillowstatic images
                 const isZillow = window.location.hostname.includes('zillow.com');
-                if (isZillow && !url.includes('zillowstatic.com')) continue;
+                if (isZillow && !url.includes('zillowstatic.com')) return;
                 
                 seen.add(url);
-                
-                // Get position on page for sorting
-                const rect = img.getBoundingClientRect();
-                
-                results.push({
-                    url: url,
-                    width: w,
-                    height: h,
-                    top: rect.top + window.scrollY,
-                    left: rect.left
-                });
+                results.push({ url, source, top });
             }
+            
+            // 1. Check for background images in hero section
+            const heroSelectors = [
+                '[data-rf-test-id="abp-photos"]',
+                '.HomeViews',
+                '.hero-image',
+                '.PhotosView',
+                '.MediaCarousel',
+                '.hdp-hero',
+                '[class*="hero"]',
+                '[class*="Hero"]',
+                '[class*="photo"]',
+                '[class*="Photo"]'
+            ];
+            
+            for (const selector of heroSelectors) {
+                try {
+                    const elements = document.querySelectorAll(selector);
+                    elements.forEach(el => {
+                        const style = window.getComputedStyle(el);
+                        const bgImage = style.backgroundImage;
+                        if (bgImage && bgImage !== 'none') {
+                            const match = bgImage.match(/url\(["']?([^"')]+)["']?\)/);
+                            if (match) {
+                                const rect = el.getBoundingClientRect();
+                                addImage(match[1], 'background-' + selector, rect.top + window.scrollY);
+                            }
+                        }
+                    });
+                } catch (e) {}
+            }
+            
+            // 2. Check all elements for background images (top 1000px of page)
+            const allElements = document.querySelectorAll('*');
+            allElements.forEach(el => {
+                try {
+                    const rect = el.getBoundingClientRect();
+                    if (rect.top > 1000) return; // Only check top of page
+                    
+                    const style = window.getComputedStyle(el);
+                    const bgImage = style.backgroundImage;
+                    if (bgImage && bgImage !== 'none' && bgImage.includes('url')) {
+                        const match = bgImage.match(/url\(["']?([^"')]+)["']?\)/);
+                        if (match) {
+                            addImage(match[1], 'background', rect.top + window.scrollY);
+                        }
+                    }
+                } catch (e) {}
+            });
+            
+            // 3. Check picture/source elements
+            document.querySelectorAll('picture').forEach(picture => {
+                const rect = picture.getBoundingClientRect();
+                
+                // Check source elements
+                picture.querySelectorAll('source').forEach(source => {
+                    const srcset = source.srcset;
+                    if (srcset) {
+                        // Get the largest image from srcset
+                        const urls = srcset.split(',').map(s => s.trim().split(' ')[0]);
+                        urls.forEach(url => addImage(url, 'picture-source', rect.top + window.scrollY));
+                    }
+                });
+                
+                // Check img inside picture
+                const img = picture.querySelector('img');
+                if (img) {
+                    addImage(img.src, 'picture-img', rect.top + window.scrollY);
+                    addImage(img.dataset.src, 'picture-datasrc', rect.top + window.scrollY);
+                }
+            });
+            
+            // 4. Check all img tags
+            document.querySelectorAll('img').forEach(img => {
+                const rect = img.getBoundingClientRect();
+                const top = rect.top + window.scrollY;
+                
+                // Skip images too far down the page (likely nearby homes)
+                if (top > 2000) return;
+                
+                // Check various src attributes
+                addImage(img.src, 'img-src', top);
+                addImage(img.dataset.src, 'img-datasrc', top);
+                addImage(img.dataset.lazySrc, 'img-lazysrc', top);
+                
+                // Check srcset
+                if (img.srcset) {
+                    const urls = img.srcset.split(',').map(s => s.trim().split(' ')[0]);
+                    urls.forEach(url => addImage(url, 'img-srcset', top));
+                }
+            });
+            
+            // 5. Look for image URLs in inline styles
+            document.querySelectorAll('[style*="background"]').forEach(el => {
+                const rect = el.getBoundingClientRect();
+                if (rect.top > 1000) return;
+                
+                const style = el.getAttribute('style') || '';
+                const matches = style.match(/url\(["']?([^"')]+)["']?\)/g);
+                if (matches) {
+                    matches.forEach(match => {
+                        const url = match.match(/url\(["']?([^"')]+)["']?\)/)[1];
+                        addImage(url, 'inline-style', rect.top + window.scrollY);
+                    });
+                }
+            });
             
             // Sort by vertical position (top to bottom)
             results.sort((a, b) => a.top - b.top);
@@ -89,7 +182,6 @@ async def get_all_property_images(page, url):
 async def scrape_single_image(url, image_index=0, capture_screenshot=False):
     """
     Scrape a single image from the page at the given index.
-    Index 0 = first/top image, 1 = second, etc.
     """
     logger.info(f"Scraping image index {image_index} from: {url}")
     
@@ -104,7 +196,7 @@ async def scrape_single_image(url, image_index=0, capture_screenshot=False):
             
             try:
                 logger.info(f"Navigating to {url}...")
-                await page.goto(url, timeout=2*60*1000, wait_until='domcontentloaded')
+                await page.goto(url, timeout=2*60*1000, wait_until='networkidle')
                 
                 title = await page.title()
                 current_url = page.url
@@ -113,6 +205,10 @@ async def scrape_single_image(url, image_index=0, capture_screenshot=False):
                 # Get all property images
                 all_images = await get_all_property_images(page, url)
                 logger.info(f"Found {len(all_images)} total property images")
+                
+                # Log first few for debugging
+                for i, img in enumerate(all_images[:5]):
+                    logger.info(f"  Image {i}: {img['source']} - {img['url'][:60]}...")
                 
                 # Get the requested image
                 image = None
@@ -146,7 +242,6 @@ async def scrape_single_image(url, image_index=0, capture_screenshot=False):
 async def scrape_all_images(url, max_images=8, capture_screenshot=False):
     """
     Scrape all property images from the page (up to max_images).
-    Returns images in order from top to bottom.
     """
     logger.info(f"Scraping up to {max_images} images from: {url}")
     
@@ -161,7 +256,7 @@ async def scrape_all_images(url, max_images=8, capture_screenshot=False):
             
             try:
                 logger.info(f"Navigating to {url}...")
-                await page.goto(url, timeout=2*60*1000, wait_until='domcontentloaded')
+                await page.goto(url, timeout=2*60*1000, wait_until='networkidle')
                 
                 title = await page.title()
                 current_url = page.url
@@ -192,7 +287,6 @@ async def scrape_all_images(url, max_images=8, capture_screenshot=False):
             if browser:
                 await browser.close()
 
-# Original endpoint - scrape multiple images
 @app.route('/scrape', methods=['POST'])
 def scrape():
     data = request.json
@@ -219,22 +313,8 @@ def scrape():
         logger.error(f"Scrape failed: {str(e)}")
         return jsonify({'success': False, 'error': str(e)}), 500
 
-# New endpoint - scrape single image by index
 @app.route('/scrape_single', methods=['POST'])
 def scrape_single():
-    """
-    Scrape a single image from the page at the specified index.
-    
-    Request body:
-    - url: The listing URL to scrape
-    - image_index: Which image to get (0 = first/top, 1 = second, etc.)
-    - screenshot: Whether to capture a screenshot (optional)
-    
-    Response:
-    - image: The image object (url, width, height) or null if index out of range
-    - total_images: Total number of property images found on page
-    - has_more: Whether there are more images after this index
-    """
     data = request.json
     url = data.get('url')
     image_index = data.get('image_index', 0)
