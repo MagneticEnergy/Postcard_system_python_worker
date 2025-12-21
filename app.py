@@ -3,6 +3,7 @@ import json
 import asyncio
 import logging
 import re
+import base64
 from flask import Flask, request, jsonify
 from playwright.async_api import async_playwright
 
@@ -19,89 +20,57 @@ SBR_WS_CDP = f'wss://{AUTH}@brd.superproxy.io:9222'
 def health():
     return jsonify({'status': 'ok', 'service': 'postcard-worker'}), 200
 
-@app.route('/debug', methods=['POST'])
-async def debug_page():
-    """Debug endpoint to see what the page actually looks like"""
-    data = request.json
-    url = data.get('url')
-    if not url:
-        return jsonify({'error': 'URL is required'}), 400
-    
-    try:
-        result = asyncio.run(get_page_debug(url))
-        return jsonify(result)
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-async def get_page_debug(url):
-    async with async_playwright() as pw:
-        browser = await pw.chromium.connect_over_cdp(SBR_WS_CDP)
-        try:
-            page = await browser.new_page()
-            await page.goto(url, timeout=120000)
-            
-            title = await page.title()
-            current_url = page.url
-            
-            # Check for __NEXT_DATA__
-            next_data_exists = await page.evaluate('''
-                () => {
-                    const script = document.querySelector('script#__NEXT_DATA__');
-                    return script ? true : false;
-                }
-            ''')
-            
-            # Get first 5000 chars of HTML
-            html_sample = await page.evaluate('() => document.documentElement.outerHTML.slice(0, 5000)')
-            
-            # Count images
-            img_count = await page.evaluate('() => document.querySelectorAll("img").length')
-            
-            # Get all image URLs
-            img_urls = await page.evaluate('''
-                () => Array.from(document.querySelectorAll('img')).map(img => img.src).filter(s => s.startsWith('http')).slice(0, 20)
-            ''')
-            
-            return {
-                'title': title,
-                'url': current_url,
-                'next_data_exists': next_data_exists,
-                'img_count': img_count,
-                'img_urls': img_urls,
-                'html_sample': html_sample
-            }
-        finally:
-            await browser.close()
-
-async def scrape_images(url):
+async def scrape_images(url, capture_screenshot=False):
     logger.info(f"Starting scrape for: {url}")
     
     async with async_playwright() as pw:
         browser = None
         try:
-            logger.info("Connecting to Bright Data Browser API...")
+            logger.info("Connecting to Bright Data Scraping Browser...")
             browser = await pw.chromium.connect_over_cdp(SBR_WS_CDP)
             logger.info("Connected!")
             
+            # Create page directly as per Bright Data docs
             page = await browser.new_page()
             
             try:
                 logger.info(f"Navigating to {url}...")
-                await page.goto(url, timeout=120000)
+                # Use longer timeout and wait for load
+                await page.goto(url, timeout=2*60*1000, wait_until='load')
                 
+                # Get page info
                 title = await page.title()
-                logger.info(f"Page loaded: {title}")
-                logger.info(f"Current URL: {page.url}")
+                current_url = page.url
+                logger.info(f"Page title: {title}")
+                logger.info(f"Current URL: {current_url}")
                 
-                # Wait for content
-                await asyncio.sleep(3)
+                # Wait for content to render
+                await asyncio.sleep(5)
+                
+                # Capture screenshot if requested
+                screenshot_b64 = None
+                if capture_screenshot:
+                    screenshot_bytes = await page.screenshot(full_page=False)
+                    screenshot_b64 = base64.b64encode(screenshot_bytes).decode('utf-8')
+                    logger.info("Screenshot captured")
+                
+                # Check for CAPTCHA or block page
+                page_content = await page.content()
+                is_blocked = any(x in page_content.lower() for x in [
+                    'captcha', 'robot', 'blocked', 'access denied', 
+                    'please verify', 'security check'
+                ])
+                
+                if is_blocked:
+                    logger.warning("Page appears to be blocked or showing CAPTCHA")
                 
                 images = []
                 
-                # REDFIN: Try __NEXT_DATA__ first
+                # REDFIN: Try to extract from __NEXT_DATA__ first
                 if 'redfin.com' in url:
-                    logger.info("Redfin detected - checking for __NEXT_DATA__")
+                    logger.info("Redfin detected")
                     
+                    # Check for __NEXT_DATA__
                     next_data = await page.evaluate('''
                         () => {
                             const script = document.querySelector('script#__NEXT_DATA__');
@@ -109,104 +78,123 @@ async def scrape_images(url):
                                 try {
                                     return JSON.parse(script.textContent);
                                 } catch (e) {
-                                    return {error: e.message};
+                                    return {parseError: e.message};
                                 }
                             }
                             return null;
                         }
                     ''')
                     
-                    if next_data and not next_data.get('error'):
-                        logger.info("Found __NEXT_DATA__!")
-                        logger.info(f"Keys: {list(next_data.keys()) if isinstance(next_data, dict) else 'not a dict'}")
-                        
-                        # Try to find photos
-                        def find_photos_recursive(obj, depth=0):
-                            if depth > 10:
+                    if next_data and not next_data.get('parseError'):
+                        logger.info("Found __NEXT_DATA__")
+                        # Try to find photos in the data
+                        def find_photos(obj, depth=0):
+                            if depth > 15:
                                 return []
                             photos = []
                             if isinstance(obj, dict):
-                                if 'photos' in obj and isinstance(obj['photos'], list):
-                                    for p in obj['photos']:
-                                        if isinstance(p, dict) and p.get('url'):
-                                            photos.append(p)
-                                        elif isinstance(p, str) and p.startswith('http'):
-                                            photos.append({'url': p})
+                                # Look for photo arrays
+                                for key in ['photos', 'photoUrls', 'images', 'media']:
+                                    if key in obj and isinstance(obj[key], list):
+                                        for item in obj[key]:
+                                            if isinstance(item, str) and item.startswith('http'):
+                                                photos.append({'url': item, 'source': 'nextdata'})
+                                            elif isinstance(item, dict):
+                                                for url_key in ['url', 'photoUrl', 'src', 'href']:
+                                                    if url_key in item and isinstance(item[url_key], str):
+                                                        photos.append({
+                                                            'url': item[url_key],
+                                                            'width': item.get('width', 0),
+                                                            'height': item.get('height', 0),
+                                                            'source': 'nextdata'
+                                                        })
+                                                        break
                                 for v in obj.values():
-                                    photos.extend(find_photos_recursive(v, depth+1))
+                                    photos.extend(find_photos(v, depth+1))
                             elif isinstance(obj, list):
                                 for item in obj:
-                                    photos.extend(find_photos_recursive(item, depth+1))
+                                    photos.extend(find_photos(item, depth+1))
                             return photos
                         
-                        found_photos = find_photos_recursive(next_data)
-                        logger.info(f"Found {len(found_photos)} photos in __NEXT_DATA__")
-                        
-                        for photo in found_photos:
-                            images.append({
-                                'url': photo.get('url', photo) if isinstance(photo, dict) else photo,
-                                'width': photo.get('width', 0) if isinstance(photo, dict) else 0,
-                                'height': photo.get('height', 0) if isinstance(photo, dict) else 0,
-                                'source': 'redfin-nextdata'
-                            })
+                        found = find_photos(next_data)
+                        logger.info(f"Found {len(found)} photos in __NEXT_DATA__")
+                        images.extend(found)
                     else:
-                        logger.warning(f"No __NEXT_DATA__ found or error: {next_data}")
+                        logger.warning(f"No __NEXT_DATA__ or parse error: {next_data}")
                 
-                # Fallback: DOM extraction with strict filtering
+                # ZILLOW: Try __INITIAL_STATE__ or window data
+                elif 'zillow.com' in url:
+                    logger.info("Zillow detected")
+                    # Similar extraction logic for Zillow
+                
+                # Fallback: DOM extraction
                 if not images:
                     logger.info("Falling back to DOM extraction")
                     
                     dom_images = await page.evaluate('''
                         () => {
-                            const imgs = [];
-                            const seenUrls = new Set();
+                            const results = [];
+                            const seen = new Set();
                             
                             document.querySelectorAll('img').forEach(img => {
                                 const url = img.src;
-                                if (!url || !url.startsWith('http')) return;
-                                if (seenUrls.has(url)) return;
-                                seenUrls.add(url);
+                                if (!url || !url.startsWith('http') || seen.has(url)) return;
+                                seen.add(url);
                                 
-                                if (img.naturalWidth < 300 || img.naturalHeight < 200) return;
+                                // Skip small images
+                                const w = img.naturalWidth || img.width || 0;
+                                const h = img.naturalHeight || img.height || 0;
+                                if (w < 200 || h < 150) return;
                                 
-                                const srcLower = url.toLowerCase();
-                                if (srcLower.includes('logo') || srcLower.includes('icon') || 
-                                    srcLower.includes('avatar') || srcLower.includes('agent') ||
-                                    srcLower.includes('map')) return;
+                                // Skip non-property images
+                                const lower = url.toLowerCase();
+                                if (lower.includes('logo') || lower.includes('icon') || 
+                                    lower.includes('avatar') || lower.includes('agent') ||
+                                    lower.includes('map') || lower.includes('sprite')) return;
                                 
-                                // Check parent chain for nearby/similar
-                                let parent = img.parentElement;
+                                // Check parent chain for nearby/similar sections
+                                let el = img.parentElement;
                                 let isNearby = false;
-                                for (let i = 0; i < 10 && parent; i++) {
-                                    const classes = (parent.className || '').toLowerCase();
-                                    if (classes.includes('nearby') || classes.includes('similar') ||
-                                        classes.includes('recommended') || classes.includes('sold')) {
+                                for (let i = 0; i < 10 && el; i++) {
+                                    const cls = (el.className || '').toLowerCase();
+                                    const txt = (el.innerText || '').toLowerCase().slice(0, 100);
+                                    if (cls.includes('nearby') || cls.includes('similar') ||
+                                        cls.includes('recommended') || cls.includes('sold') ||
+                                        txt.includes('nearby home') || txt.includes('similar home')) {
                                         isNearby = true;
                                         break;
                                     }
-                                    parent = parent.parentElement;
+                                    el = el.parentElement;
                                 }
                                 
                                 if (!isNearby) {
-                                    imgs.push({
+                                    results.push({
                                         url: url,
-                                        width: img.naturalWidth,
-                                        height: img.naturalHeight,
-                                        source: 'dom-filtered'
+                                        width: w,
+                                        height: h,
+                                        alt: img.alt || '',
+                                        source: 'dom'
                                     });
                                 }
                             });
                             
-                            return imgs;
+                            return results;
                         }
                     ''')
                     
                     images = dom_images
                     logger.info(f"DOM extraction found {len(images)} images")
                 
-                # Sort and return
+                # Sort by size
                 images.sort(key=lambda x: x.get('width', 0) * x.get('height', 0), reverse=True)
-                return images[:8]
+                
+                return {
+                    'images': images[:8],
+                    'page_title': title,
+                    'page_url': current_url,
+                    'is_blocked': is_blocked,
+                    'screenshot': screenshot_b64
+                }
                 
             finally:
                 await page.close()
@@ -219,12 +207,23 @@ async def scrape_images(url):
 def scrape():
     data = request.json
     url = data.get('url')
+    capture_screenshot = data.get('screenshot', False)
+    
     if not url:
         return jsonify({'error': 'URL is required'}), 400
         
     try:
-        images = asyncio.run(scrape_images(url))
-        return jsonify({'success': True, 'images': images})
+        result = asyncio.run(scrape_images(url, capture_screenshot))
+        return jsonify({
+            'success': True,
+            'images': result['images'],
+            'debug': {
+                'page_title': result['page_title'],
+                'page_url': result['page_url'],
+                'is_blocked': result['is_blocked']
+            },
+            'screenshot': result.get('screenshot')
+        })
     except Exception as e:
         logger.error(f"Scrape failed: {str(e)}")
         return jsonify({'success': False, 'error': str(e)}), 500
