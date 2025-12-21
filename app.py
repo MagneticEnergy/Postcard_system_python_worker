@@ -14,8 +14,9 @@ WEB_UNLOCKER_PROXY = {
     "password": os.environ.get("WEB_UNLOCKER_PASSWORD", "9bra6mx0xptc")
 }
 
-# Hero area threshold - images above this Y position are considered hero images
-HERO_Y_THRESHOLD = 600  # pixels from top
+# Hero area threshold - INCREASED to capture main listing images
+# Redfin's main images appear around Y=1800, nearby homes are further down
+HERO_Y_THRESHOLD = 2000  # pixels from top - will capture main listing area
 
 @app.route("/health", methods=["GET"])
 def health():
@@ -35,7 +36,7 @@ def run_async(coro):
         loop.close()
 
 async def scrape_page(url: str, capture_screenshot: bool = False):
-    """Scrape a URL and extract ONLY hero area images"""
+    """Scrape a URL and extract hero area images"""
     
     async with async_playwright() as p:
         browser = await p.chromium.launch(
@@ -67,8 +68,11 @@ async def scrape_page(url: str, capture_screenshot: bool = False):
                 screenshot_bytes = await page.screenshot(full_page=False)
                 screenshot_base64 = base64.b64encode(screenshot_bytes).decode("utf-8")
             
-            # Extract ONLY hero area images
-            hero_images = await extract_hero_images(page, url)
+            # Extract images with detailed position info
+            all_images = await extract_all_images_with_positions(page, url)
+            
+            # Filter to hero area only
+            hero_images = [img for img in all_images if img["y_position"] < HERO_Y_THRESHOLD]
             
             result = {
                 "success": True,
@@ -76,8 +80,10 @@ async def scrape_page(url: str, capture_screenshot: bool = False):
                 "title": title,
                 "hero_images": hero_images,
                 "hero_image_count": len(hero_images),
+                "total_images_found": len(all_images),
                 "method": "playwright_web_unlocker_proxy",
-                "hero_threshold": HERO_Y_THRESHOLD
+                "hero_threshold": HERO_Y_THRESHOLD,
+                "debug_all_positions": [img["y_position"] for img in all_images[:10]]
             }
             
             if screenshot_base64:
@@ -95,12 +101,11 @@ async def scrape_page(url: str, capture_screenshot: bool = False):
             await context.close()
             await browser.close()
 
-async def extract_hero_images(page, url: str):
-    """Extract ONLY images from the hero area (top of page)"""
-    hero_images = []
+async def extract_all_images_with_positions(page, url: str):
+    """Extract ALL images with their positions for debugging"""
+    images = []
     seen_urls = set()
     
-    # Get all images on the page
     all_imgs = await page.query_selector_all("img")
     
     for img in all_imgs:
@@ -112,7 +117,6 @@ async def extract_hero_images(page, url: str):
             if src in seen_urls:
                 continue
             
-            # Get bounding box to check Y position
             box = await img.bounding_box()
             if not box:
                 continue
@@ -121,16 +125,12 @@ async def extract_hero_images(page, url: str):
             width = box["width"]
             height = box["height"]
             
-            # ONLY include images in hero area (top of page)
-            if y_position > HERO_Y_THRESHOLD:
-                continue
-            
-            # Skip tiny images (icons, etc.)
+            # Skip tiny images
             if width < 100 or height < 100:
                 continue
             
             seen_urls.add(src)
-            hero_images.append({
+            images.append({
                 "url": src,
                 "y_position": y_position,
                 "width": width,
@@ -138,16 +138,15 @@ async def extract_hero_images(page, url: str):
                 "area": width * height
             })
             
-        except Exception as e:
+        except:
             continue
     
-    # Sort by Y position (top to bottom), then by area (larger first)
-    hero_images.sort(key=lambda x: (x["y_position"], -x["area"]))
+    # Sort by Y position
+    images.sort(key=lambda x: x["y_position"])
     
-    return hero_images
+    return images
 
 def is_valid_listing_image(url: str) -> bool:
-    """Check if URL is a valid listing image"""
     if not url:
         return False
     
@@ -173,54 +172,36 @@ def is_valid_listing_image(url: str) -> bool:
     
     return has_extension or is_cdn
 
-# ============================================================
-# ENDPOINTS
-# ============================================================
-
 @app.route("/scrape", methods=["POST"])
 def scrape_endpoint():
-    """Scrape page and return all hero images"""
     try:
         data = request.get_json()
         url = data.get("url")
-        
         if not url:
             return jsonify({"error": "URL is required"}), 400
-        
         result = run_async(scrape_page(url, capture_screenshot=False))
         return jsonify(result)
-        
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 @app.route("/scrape_with_screenshot", methods=["POST"])
 def scrape_with_screenshot_endpoint():
-    """Scrape page with screenshot for verification"""
     try:
         data = request.get_json()
         url = data.get("url")
-        
         if not url:
             return jsonify({"error": "URL is required"}), 400
-        
         result = run_async(scrape_page(url, capture_screenshot=True))
         return jsonify(result)
-        
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 @app.route("/scrape_single", methods=["POST"])
 def scrape_single_image():
-    """
-    Get a SINGLE hero image by index.
-    Use this for sequential analysis - request index 0, analyze,
-    if not good enough request index 1, etc.
-    """
     try:
         data = request.get_json()
         url = data.get("url")
         index = data.get("index", 0)
-        
         if not url:
             return jsonify({"error": "URL is required"}), 400
         
@@ -237,7 +218,8 @@ def scrape_single_image():
                 "has_image": False,
                 "index": index,
                 "total_hero_images": len(hero_images),
-                "message": f"No more hero images. Only {len(hero_images)} found."
+                "message": f"No more hero images. Only {len(hero_images)} found.",
+                "debug_positions": result.get("debug_all_positions", [])
             })
         
         image = hero_images[index]
