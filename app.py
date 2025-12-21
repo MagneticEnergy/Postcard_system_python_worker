@@ -2,6 +2,7 @@ import os
 import json
 import asyncio
 import logging
+import re
 from flask import Flask, request, jsonify
 from playwright.async_api import async_playwright
 
@@ -22,6 +23,15 @@ def health():
 
 async def scrape_images(url):
     logger.info(f"Starting scrape for: {url}")
+    
+    # Extract listing ID from URL for Redfin
+    listing_id = None
+    if 'redfin.com' in url:
+        match = re.search(r'/home/(\d+)', url)
+        if match:
+            listing_id = match.group(1)
+            logger.info(f"Extracted Redfin listing ID: {listing_id}")
+    
     async with async_playwright() as pw:
         browser = None
         try:
@@ -35,145 +45,153 @@ async def scrape_images(url):
                 page = None
                 try:
                     logger.info(f"Attempt {attempt + 1}/{max_retries}")
-                    context = await browser.new_context()
+                    context = await browser.new_context(
+                        viewport={'width': 1920, 'height': 1080},
+                        user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                    )
                     page = await context.new_page()
                     
+                    # Navigate and wait for network to be idle
                     logger.info("Navigating...")
-                    await page.goto(url, timeout=60000, wait_until='domcontentloaded')
+                    await page.goto(url, timeout=60000, wait_until='networkidle')
                     logger.info(f"Page loaded: {await page.title()}")
                     
-                    try:
-                        await page.wait_for_selector('img', timeout=10000)
-                    except:
-                        logger.warning("Timeout waiting for img selector, proceeding anyway")
+                    # Wait a bit for dynamic content
+                    await asyncio.sleep(2)
                     
-                    current_url = page.url.lower()
+                    # Scroll down to trigger lazy loading
+                    logger.info("Scrolling to load content...")
+                    await page.evaluate('window.scrollTo(0, 500)')
+                    await asyncio.sleep(1)
+                    await page.evaluate('window.scrollTo(0, 0)')
+                    await asyncio.sleep(1)
                     
-                    # JavaScript to extract ONLY main property images
+                    # For Redfin, try to click on the main photo to open gallery
+                    if 'redfin.com' in url:
+                        try:
+                            logger.info("Trying to click main photo gallery...")
+                            # Try various selectors for the main photo
+                            selectors = [
+                                '[data-rf-test-id="gallery-photo"]',
+                                '.HomeMainMedia img',
+                                '.MediaCenter img',
+                                '.hero-image',
+                                'img[src*="redfin"]'
+                            ]
+                            for sel in selectors:
+                                elem = await page.query_selector(sel)
+                                if elem:
+                                    logger.info(f"Found element with selector: {sel}")
+                                    break
+                        except Exception as e:
+                            logger.warning(f"Could not interact with gallery: {e}")
+                    
+                    # Extract images with detailed info
                     js_code = """
-                    (currentUrl) => {
-                        const imgs = [];
-                        const seenUrls = new Set();
+                    (listingId) => {
+                        const results = {
+                            images: [],
+                            debug: {
+                                totalImages: 0,
+                                pageUrl: window.location.href,
+                                pageTitle: document.title
+                            }
+                        };
                         
-                        function addImage(img, source) {
-                            const url = img.src || img.dataset?.src || '';
+                        const seenUrls = new Set();
+                        const allImgs = document.querySelectorAll('img');
+                        results.debug.totalImages = allImgs.length;
+                        
+                        // Log all image sources for debugging
+                        const allSources = [];
+                        
+                        allImgs.forEach((img, idx) => {
+                            const url = img.src || '';
                             if (!url || !url.startsWith('http')) return;
                             if (seenUrls.has(url)) return;
                             seenUrls.add(url);
-                            imgs.push({
+                            
+                            // Get parent info for debugging
+                            const parentClasses = [];
+                            let parent = img.parentElement;
+                            for (let i = 0; i < 5 && parent; i++) {
+                                if (parent.className) parentClasses.push(parent.className);
+                                parent = parent.parentElement;
+                            }
+                            
+                            // Check if this is a "nearby" or "similar" image
+                            const parentChain = parentClasses.join(' ').toLowerCase();
+                            const isNearby = parentChain.includes('nearby') || 
+                                           parentChain.includes('similar') ||
+                                           parentChain.includes('recommended') ||
+                                           parentChain.includes('sold');
+                            
+                            // For Redfin, check if URL contains the listing ID
+                            let matchesListing = true;
+                            if (listingId && url.includes('redfin')) {
+                                // Redfin photo URLs don't contain listing ID directly
+                                // But we can check if it's in the main content area
+                                matchesListing = !isNearby;
+                            }
+                            
+                            const imgData = {
                                 url: url,
                                 width: img.naturalWidth || parseInt(img.width) || 0,
                                 height: img.naturalHeight || parseInt(img.height) || 0,
                                 alt: img.alt || '',
-                                source: source
-                            });
-                        }
-                        
-                        // REDFIN: Target main property images only
-                        if (currentUrl.includes('redfin.com')) {
-                            const mainSelectors = [
-                                '.HomeViews img',
-                                '.MediaCenter img', 
-                                '.PhotosView img',
-                                '.HomeMainMedia img',
-                                '[data-rf-test-id="gallery-photo"] img',
-                                '.carousel img',
-                                '.hero-image img',
-                                '.main-photo img'
-                            ];
+                                isNearby: isNearby,
+                                matchesListing: matchesListing,
+                                parentClasses: parentClasses.slice(0, 3)
+                            };
                             
-                            for (const selector of mainSelectors) {
-                                document.querySelectorAll(selector).forEach(img => addImage(img, 'redfin-main'));
-                            }
+                            allSources.push(imgData);
                             
-                            if (imgs.length === 0) {
-                                const allImgs = document.querySelectorAll('img');
-                                allImgs.forEach(img => {
-                                    const parent = img.closest('[class*="nearby"], [class*="similar"], [class*="Nearby"], [class*="Similar"], [class*="recommended"], [class*="Recommended"], [data-rf-test-id*="similar"], [data-rf-test-id*="nearby"]');
-                                    if (parent) return;
-                                    
-                                    const section = img.closest('section, div[class*="Section"]');
-                                    if (section) {
-                                        const headerText = section.querySelector('h2, h3, h4')?.textContent?.toLowerCase() || '';
-                                        if (headerText.includes('nearby') || headerText.includes('similar') || 
-                                            headerText.includes('sold') || headerText.includes('recommended')) {
-                                            return;
-                                        }
+                            // Only add if it's a main listing image
+                            if (matchesListing && !isNearby) {
+                                // Filter out small images, logos, icons
+                                if (imgData.width >= 300 && imgData.height >= 200) {
+                                    const srcLower = url.toLowerCase();
+                                    if (!srcLower.includes('logo') && 
+                                        !srcLower.includes('icon') && 
+                                        !srcLower.includes('avatar') &&
+                                        !srcLower.includes('agent') &&
+                                        !srcLower.includes('map')) {
+                                        results.images.push({
+                                            url: url,
+                                            width: imgData.width,
+                                            height: imgData.height,
+                                            alt: imgData.alt,
+                                            source: 'main-listing'
+                                        });
                                     }
-                                    
-                                    addImage(img, 'redfin-filtered');
-                                });
+                                }
                             }
-                        }
-                        // ZILLOW
-                        else if (currentUrl.includes('zillow.com')) {
-                            const mainSelectors = [
-                                '[data-testid="hollywood-vertical-carousel"] img',
-                                '.media-stream img',
-                                '.photo-carousel img',
-                                '.hdp__sc-1s2b8ok img',
-                                '[class*="PhotoCarousel"] img',
-                                '[class*="MediaGallery"] img'
-                            ];
-                            
-                            for (const selector of mainSelectors) {
-                                document.querySelectorAll(selector).forEach(img => addImage(img, 'zillow-main'));
-                            }
-                            
-                            if (imgs.length === 0) {
-                                document.querySelectorAll('img').forEach(img => {
-                                    const parent = img.closest('[class*="nearby"], [class*="similar"], [class*="Nearby"], [class*="Similar"]');
-                                    if (parent) return;
-                                    addImage(img, 'zillow-filtered');
-                                });
-                            }
-                        }
-                        // OTHER SITES
-                        else {
-                            const mainSelectors = [
-                                '.gallery img',
-                                '.photo-gallery img',
-                                '.listing-photos img',
-                                '.property-photos img',
-                                '[class*="Gallery"] img',
-                                '[class*="Carousel"] img'
-                            ];
-                            
-                            for (const selector of mainSelectors) {
-                                document.querySelectorAll(selector).forEach(img => addImage(img, 'other-main'));
-                            }
-                            
-                            if (imgs.length === 0) {
-                                document.querySelectorAll('img').forEach(img => {
-                                    const parent = img.closest('[class*="nearby"], [class*="similar"]');
-                                    if (parent) return;
-                                    addImage(img, 'other-filtered');
-                                });
-                            }
-                        }
+                        });
                         
-                        return imgs;
+                        results.debug.allSources = allSources.slice(0, 20); // First 20 for debugging
+                        return results;
                     }
                     """
                     
-                    images = await page.evaluate(js_code, current_url)
-                    logger.info(f"Extracted {len(images)} raw images")
+                    result = await page.evaluate(js_code, listing_id)
                     
-                    # Filter and Sort
-                    valid_images = []
-                    for img in images:
-                        src = img['url'].lower()
-                        if any(x in src for x in ['logo', 'icon', 'map', 'avatar', 'profile', 'agent']):
-                            continue
-                        if img['width'] < 300 or img['height'] < 200:
-                            continue
-                        valid_images.append(img)
+                    images = result.get('images', [])
+                    debug_info = result.get('debug', {})
                     
-                    valid_images.sort(key=lambda x: x['width'] * x['height'], reverse=True)
-                    result = valid_images[:8]
+                    logger.info(f"Page: {debug_info.get('pageTitle')}")
+                    logger.info(f"Total images on page: {debug_info.get('totalImages')}")
+                    logger.info(f"Filtered main listing images: {len(images)}")
                     
-                    logger.info(f"Returning {len(result)} valid images")
-                    return result
+                    # Log some debug info about what we found
+                    all_sources = debug_info.get('allSources', [])
+                    nearby_count = sum(1 for s in all_sources if s.get('isNearby'))
+                    logger.info(f"Images marked as nearby/similar: {nearby_count}")
+                    
+                    # Sort by size
+                    images.sort(key=lambda x: x['width'] * x['height'], reverse=True)
+                    
+                    # Return top 8
+                    return images[:8]
                     
                 except Exception as e:
                     logger.error(f"Error in attempt {attempt + 1}: {str(e)}")
