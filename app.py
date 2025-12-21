@@ -7,17 +7,24 @@ from playwright.async_api import async_playwright
 
 app = Flask(__name__)
 
-# Web Unlocker proxy configuration (CHEAPER than Browser API!)
-# Cost: ~$1.50 per 1000 requests vs $8/GB for Browser API
+# Web Unlocker proxy configuration
 WEB_UNLOCKER_PROXY = {
     "server": "http://brd.superproxy.io:33335",
     "username": "brd-customer-hl_ead19305-zone-web_unlocker1",
     "password": os.environ.get("WEB_UNLOCKER_PASSWORD", "9bra6mx0xptc")
 }
 
+# Hero area threshold - images above this Y position are considered hero images
+HERO_Y_THRESHOLD = 600  # pixels from top
+
 @app.route("/health", methods=["GET"])
 def health():
-    return jsonify({"status": "healthy", "timestamp": datetime.now().isoformat(), "proxy": "web_unlocker1"})
+    return jsonify({
+        "status": "healthy",
+        "timestamp": datetime.now().isoformat(),
+        "proxy": "web_unlocker1",
+        "hero_threshold": HERO_Y_THRESHOLD
+    })
 
 def run_async(coro):
     loop = asyncio.new_event_loop()
@@ -27,8 +34,8 @@ def run_async(coro):
     finally:
         loop.close()
 
-async def scrape_with_playwright(url: str, capture_screenshot: bool = False):
-    """Scrape a URL using Playwright with Web Unlocker proxy"""
+async def scrape_page(url: str, capture_screenshot: bool = False):
+    """Scrape a URL and extract ONLY hero area images"""
     
     async with async_playwright() as p:
         browser = await p.chromium.launch(
@@ -50,32 +57,27 @@ async def scrape_with_playwright(url: str, capture_screenshot: bool = False):
         page = await context.new_page()
         
         try:
-            # Navigate to URL with longer timeout for proxy
             await page.goto(url, wait_until="domcontentloaded", timeout=90000)
-            
-            # Wait for content to load
             await page.wait_for_timeout(5000)
             
-            # Get page title for verification
             title = await page.title()
             
-            # Capture screenshot if requested
             screenshot_base64 = None
             if capture_screenshot:
                 screenshot_bytes = await page.screenshot(full_page=False)
                 screenshot_base64 = base64.b64encode(screenshot_bytes).decode("utf-8")
             
-            # Extract images based on site type
-            images = await extract_images(page, url)
+            # Extract ONLY hero area images
+            hero_images = await extract_hero_images(page, url)
             
             result = {
                 "success": True,
                 "url": url,
                 "title": title,
-                "images": images,
-                "image_count": len(images),
+                "hero_images": hero_images,
+                "hero_image_count": len(hero_images),
                 "method": "playwright_web_unlocker_proxy",
-                "cost_estimate": "$0.0015 per request"
+                "hero_threshold": HERO_Y_THRESHOLD
             }
             
             if screenshot_base64:
@@ -87,147 +89,70 @@ async def scrape_with_playwright(url: str, capture_screenshot: bool = False):
             return {
                 "success": False,
                 "error": str(e),
-                "url": url,
-                "method": "playwright_web_unlocker_proxy"
+                "url": url
             }
         finally:
             await context.close()
             await browser.close()
 
-async def extract_images(page, url: str):
-    """Extract images from the page - sequential from top to bottom"""
-    images = []
-    
-    if "redfin.com" in url:
-        images = await extract_redfin_images(page)
-    elif "zillow.com" in url:
-        images = await extract_zillow_images(page)
-    else:
-        images = await extract_generic_images(page)
-    
-    # Limit to 8 images max
-    return images[:8]
-
-async def extract_redfin_images(page):
-    """Extract images from Redfin - prioritize hero/main images"""
-    images = []
+async def extract_hero_images(page, url: str):
+    """Extract ONLY images from the hero area (top of page)"""
+    hero_images = []
     seen_urls = set()
     
-    # Priority 1: Main hero image (the big one at the top)
-    hero_selectors = [
-        "img.img-card",
-        ".PhotosView img",
-        ".HomeMainStats img",
-        "[data-rf-test-id='basic-card-photo'] img",
-        ".dp-photos img"
-    ]
+    # Get all images on the page
+    all_imgs = await page.query_selector_all("img")
     
-    for selector in hero_selectors:
+    for img in all_imgs:
         try:
-            elements = await page.query_selector_all(selector)
-            for el in elements[:3]:  # Only first 3 from each selector
-                src = await el.get_attribute("src")
-                if src and is_valid_listing_image(src) and src not in seen_urls:
-                    seen_urls.add(src)
-                    # Get position for sorting
-                    box = await el.bounding_box()
-                    y_pos = box["y"] if box else 9999
-                    images.append({
-                        "url": src,
-                        "source": "redfin",
-                        "selector": selector,
-                        "y_position": y_pos
-                    })
+            src = await img.get_attribute("src")
+            if not src or not is_valid_listing_image(src):
+                continue
+            
+            if src in seen_urls:
+                continue
+            
+            # Get bounding box to check Y position
+            box = await img.bounding_box()
+            if not box:
+                continue
+            
+            y_position = box["y"]
+            width = box["width"]
+            height = box["height"]
+            
+            # ONLY include images in hero area (top of page)
+            if y_position > HERO_Y_THRESHOLD:
+                continue
+            
+            # Skip tiny images (icons, etc.)
+            if width < 100 or height < 100:
+                continue
+            
+            seen_urls.add(src)
+            hero_images.append({
+                "url": src,
+                "y_position": y_position,
+                "width": width,
+                "height": height,
+                "area": width * height
+            })
+            
         except Exception as e:
-            pass
+            continue
     
-    # Priority 2: All images with photo CDN URLs
-    try:
-        all_imgs = await page.query_selector_all("img[src*='ssl.cdn-redfin.com/photo']")
-        for img in all_imgs[:10]:
-            src = await img.get_attribute("src")
-            if src and is_valid_listing_image(src) and src not in seen_urls:
-                seen_urls.add(src)
-                box = await img.bounding_box()
-                y_pos = box["y"] if box else 9999
-                images.append({
-                    "url": src,
-                    "source": "redfin_cdn",
-                    "y_position": y_pos
-                })
-    except:
-        pass
+    # Sort by Y position (top to bottom), then by area (larger first)
+    hero_images.sort(key=lambda x: (x["y_position"], -x["area"]))
     
-    # Sort by Y position (top to bottom)
-    images.sort(key=lambda x: x.get("y_position", 9999))
-    
-    return images
-
-async def extract_zillow_images(page):
-    """Extract images from Zillow - prioritize main gallery"""
-    images = []
-    seen_urls = set()
-    
-    selectors = [
-        "[data-testid='hdp-photo-carousel'] img",
-        ".media-stream img",
-        "picture img",
-        ".photo-carousel img"
-    ]
-    
-    for selector in selectors:
-        try:
-            elements = await page.query_selector_all(selector)
-            for el in elements[:5]:
-                src = await el.get_attribute("src")
-                if src and is_valid_listing_image(src) and src not in seen_urls:
-                    seen_urls.add(src)
-                    box = await el.bounding_box()
-                    y_pos = box["y"] if box else 9999
-                    images.append({
-                        "url": src,
-                        "source": "zillow",
-                        "selector": selector,
-                        "y_position": y_pos
-                    })
-        except:
-            pass
-    
-    images.sort(key=lambda x: x.get("y_position", 9999))
-    return images
-
-async def extract_generic_images(page):
-    """Extract images from any page"""
-    images = []
-    seen_urls = set()
-    
-    try:
-        all_imgs = await page.query_selector_all("img")
-        for img in all_imgs[:20]:
-            src = await img.get_attribute("src")
-            if src and is_valid_listing_image(src) and src not in seen_urls:
-                seen_urls.add(src)
-                box = await img.bounding_box()
-                y_pos = box["y"] if box else 9999
-                images.append({
-                    "url": src,
-                    "source": "generic",
-                    "y_position": y_pos
-                })
-    except:
-        pass
-    
-    images.sort(key=lambda x: x.get("y_position", 9999))
-    return images
+    return hero_images
 
 def is_valid_listing_image(url: str) -> bool:
-    """Check if URL is a valid listing image (not icon, logo, etc.)"""
+    """Check if URL is a valid listing image"""
     if not url:
         return False
     
     url_lower = url.lower()
     
-    # Exclude patterns
     exclude_patterns = [
         "logo", "icon", "avatar", "profile", "agent",
         "map", "satellite", "streetview", "street-view",
@@ -235,23 +160,26 @@ def is_valid_listing_image(url: str) -> bool:
         "facebook", "twitter", "instagram", "social",
         "badge", "seal", "certificate", "award",
         "1x1", "pixel", "tracking", "beacon",
-        "data:image", "svg+xml"
+        "data:image", "svg+xml", "base64"
     ]
     
     for pattern in exclude_patterns:
         if pattern in url_lower:
             return False
     
-    # Must be an image file or CDN URL
     valid_extensions = [".jpg", ".jpeg", ".png", ".webp"]
     has_extension = any(ext in url_lower for ext in valid_extensions)
     is_cdn = "cdn" in url_lower or "photo" in url_lower
     
     return has_extension or is_cdn
 
+# ============================================================
+# ENDPOINTS
+# ============================================================
+
 @app.route("/scrape", methods=["POST"])
-def scrape_sync():
-    """Main scrape endpoint"""
+def scrape_endpoint():
+    """Scrape page and return all hero images"""
     try:
         data = request.get_json()
         url = data.get("url")
@@ -259,15 +187,15 @@ def scrape_sync():
         if not url:
             return jsonify({"error": "URL is required"}), 400
         
-        result = run_async(scrape_with_playwright(url, capture_screenshot=False))
+        result = run_async(scrape_page(url, capture_screenshot=False))
         return jsonify(result)
         
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 @app.route("/scrape_with_screenshot", methods=["POST"])
-def scrape_with_screenshot_sync():
-    """Scrape endpoint with screenshot for verification"""
+def scrape_with_screenshot_endpoint():
+    """Scrape page with screenshot for verification"""
     try:
         data = request.get_json()
         url = data.get("url")
@@ -275,7 +203,7 @@ def scrape_with_screenshot_sync():
         if not url:
             return jsonify({"error": "URL is required"}), 400
         
-        result = run_async(scrape_with_playwright(url, capture_screenshot=True))
+        result = run_async(scrape_page(url, capture_screenshot=True))
         return jsonify(result)
         
     except Exception as e:
@@ -283,7 +211,11 @@ def scrape_with_screenshot_sync():
 
 @app.route("/scrape_single", methods=["POST"])
 def scrape_single_image():
-    """Get a single image by index for sequential processing"""
+    """
+    Get a SINGLE hero image by index.
+    Use this for sequential analysis - request index 0, analyze,
+    if not good enough request index 1, etc.
+    """
     try:
         data = request.get_json()
         url = data.get("url")
@@ -292,27 +224,33 @@ def scrape_single_image():
         if not url:
             return jsonify({"error": "URL is required"}), 400
         
-        result = run_async(scrape_with_playwright(url, capture_screenshot=False))
+        result = run_async(scrape_page(url, capture_screenshot=False))
         
-        if result.get("success") and result.get("images"):
-            images = result["images"]
-            if index < len(images):
-                return jsonify({
-                    "success": True,
-                    "image": images[index],
-                    "index": index,
-                    "total_images": len(images),
-                    "has_more": index < len(images) - 1
-                })
-            else:
-                return jsonify({
-                    "success": False,
-                    "error": f"Index {index} out of range. Only {len(images)} images found.",
-                    "total_images": len(images)
-                })
-        else:
+        if not result.get("success"):
             return jsonify(result)
-            
+        
+        hero_images = result.get("hero_images", [])
+        
+        if index >= len(hero_images):
+            return jsonify({
+                "success": True,
+                "has_image": False,
+                "index": index,
+                "total_hero_images": len(hero_images),
+                "message": f"No more hero images. Only {len(hero_images)} found."
+            })
+        
+        image = hero_images[index]
+        return jsonify({
+            "success": True,
+            "has_image": True,
+            "image": image,
+            "index": index,
+            "total_hero_images": len(hero_images),
+            "has_more": index < len(hero_images) - 1,
+            "title": result.get("title")
+        })
+        
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
