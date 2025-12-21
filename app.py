@@ -196,7 +196,7 @@ async def scrape_single_image(url, image_index=0, capture_screenshot=False):
             
             try:
                 logger.info(f"Navigating to {url}...")
-                await page.goto(url, timeout=2*60*1000, wait_until='networkidle')
+                await page.goto(url, timeout=2*60*1000, wait_until='domcontentloaded')
                 
                 title = await page.title()
                 current_url = page.url
@@ -256,7 +256,7 @@ async def scrape_all_images(url, max_images=8, capture_screenshot=False):
             
             try:
                 logger.info(f"Navigating to {url}...")
-                await page.goto(url, timeout=2*60*1000, wait_until='networkidle')
+                await page.goto(url, timeout=2*60*1000, wait_until='domcontentloaded')
                 
                 title = await page.title()
                 current_url = page.url
