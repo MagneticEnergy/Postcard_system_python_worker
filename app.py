@@ -46,26 +46,43 @@ async def extract_hero_images(page):
         # JavaScript to extract images from hero area
         js_code = """
             () => {
-                const heroHeight = 700;
+                const heroHeight = 800;  // Increased from 700
                 const images = [];
                 const seenUrls = new Set();
+                const debug = [];
 
                 const addImage = (url, width, height, top, source) => {
                     if (!url || seenUrls.has(url)) return;
                     if (!url.startsWith('http')) return;
                     if (url.includes('logo') || url.includes('icon') || url.includes('avatar')) return;
                     if (url.includes('sprite') || url.includes('placeholder')) return;
-                    if (width < 100 || height < 100) return;
+                    // Reduced minimum size to catch more images
+                    if (width < 50 || height < 50) return;
 
                     seenUrls.add(url);
                     images.push({ url, width, height, top, source });
                 };
 
-                // Method 1: Standard img tags
+                // Count all elements for debugging
+                debug.push('Total img tags: ' + document.querySelectorAll('img').length);
+                debug.push('Total picture tags: ' + document.querySelectorAll('picture').length);
+
+                // Method 1: Standard img tags - check ALL attributes
                 document.querySelectorAll('img').forEach((img) => {
                     const rect = img.getBoundingClientRect();
-                    if (rect.top < heroHeight) {
-                        const src = img.src || img.dataset.src || img.getAttribute('data-src') || img.currentSrc;
+                    // Check multiple possible sources
+                    const possibleSrcs = [
+                        img.src,
+                        img.currentSrc,
+                        img.dataset.src,
+                        img.getAttribute('data-src'),
+                        img.getAttribute('data-lazy-src'),
+                        img.getAttribute('data-original'),
+                        img.srcset ? img.srcset.split(',')[0].trim().split(' ')[0] : null
+                    ].filter(Boolean);
+
+                    if (rect.top < heroHeight && possibleSrcs.length > 0) {
+                        const src = possibleSrcs[0];
                         addImage(src, rect.width, rect.height, rect.top, 'img_tag');
                     }
                 });
@@ -73,7 +90,7 @@ async def extract_hero_images(page):
                 // Method 2: Background images
                 document.querySelectorAll('*').forEach((el) => {
                     const rect = el.getBoundingClientRect();
-                    if (rect.top < heroHeight && rect.width > 150 && rect.height > 100) {
+                    if (rect.top < heroHeight && rect.width > 100 && rect.height > 80) {
                         const style = window.getComputedStyle(el);
                         const bgImage = style.backgroundImage;
                         if (bgImage && bgImage !== 'none' && bgImage.includes('url')) {
@@ -85,44 +102,62 @@ async def extract_hero_images(page):
                     }
                 });
 
-                // Method 3: Picture/source elements
-                document.querySelectorAll('picture source, picture img').forEach((el) => {
-                    const rect = el.getBoundingClientRect();
+                // Method 3: Picture/source elements with srcset
+                document.querySelectorAll('picture').forEach((picture) => {
+                    const rect = picture.getBoundingClientRect();
                     if (rect.top < heroHeight) {
-                        const src = el.srcset?.split(' ')[0] || el.src;
-                        addImage(src, rect.width || 300, rect.height || 200, rect.top, 'picture');
+                        // Check source elements
+                        picture.querySelectorAll('source').forEach((source) => {
+                            const srcset = source.srcset;
+                            if (srcset) {
+                                const src = srcset.split(',')[0].trim().split(' ')[0];
+                                addImage(src, rect.width || 300, rect.height || 200, rect.top, 'picture_source');
+                            }
+                        });
+                        // Check img inside picture
+                        const img = picture.querySelector('img');
+                        if (img) {
+                            const src = img.currentSrc || img.src;
+                            addImage(src, rect.width || 300, rect.height || 200, rect.top, 'picture_img');
+                        }
                     }
                 });
 
-                // Method 4: Photo containers (Redfin/Zillow specific)
-                document.querySelectorAll('[class*="photo"], [class*="Photo"], [class*="image"], [class*="Image"], [class*="gallery"], [class*="Gallery"]').forEach((el) => {
+                // Method 4: Redfin-specific selectors
+                document.querySelectorAll('[class*="photo"], [class*="Photo"], [class*="image"], [class*="Image"], [class*="media"], [class*="Media"], [class*="gallery"], [class*="Gallery"]').forEach((el) => {
                     const rect = el.getBoundingClientRect();
                     if (rect.top < heroHeight) {
                         const img = el.querySelector('img');
                         if (img) {
-                            const src = img.src || img.dataset.src || img.currentSrc;
-                            addImage(src, rect.width, rect.height, rect.top, 'photo_container');
+                            const src = img.currentSrc || img.src || img.dataset.src;
+                            if (src) addImage(src, rect.width, rect.height, rect.top, 'photo_class');
                         }
+                        // Also check for background image on the element itself
                         const style = window.getComputedStyle(el);
                         const bgImage = style.backgroundImage;
                         if (bgImage && bgImage !== 'none' && bgImage.includes('url')) {
                             const urlMatch = bgImage.match(/url\(["']?([^"')]+)["']?\)/);
                             if (urlMatch) {
-                                addImage(urlMatch[1], rect.width, rect.height, rect.top, 'photo_container_bg');
+                                addImage(urlMatch[1], rect.width, rect.height, rect.top, 'photo_class_bg');
                             }
                         }
                     }
                 });
 
-                // Sort by position and size
-                images.sort((a, b) => {
-                    if (Math.abs(a.top - b.top) < 50) {
-                        return (b.width * b.height) - (a.width * a.height);
-                    }
-                    return a.top - b.top;
+                // Method 5: Check for Redfin's specific image container
+                document.querySelectorAll('[data-rf-test-id*="photo"], [data-rf-test-id*="image"], .HomeViews, .PhotosView, .MediaGallery').forEach((el) => {
+                    const imgs = el.querySelectorAll('img');
+                    imgs.forEach((img) => {
+                        const rect = img.getBoundingClientRect();
+                        const src = img.currentSrc || img.src;
+                        if (src) addImage(src, rect.width, rect.height, rect.top, 'redfin_specific');
+                    });
                 });
 
-                return images.slice(0, 12);
+                debug.push('Images found: ' + images.length);
+                console.log('Debug:', debug);
+
+                return images;
             }
         """
 
@@ -248,7 +283,7 @@ async def scrape_with_playwright(url):
 def health():
     return jsonify({
         'status': 'healthy',
-        'version': '7.5-fixed-creds',
+        'version': '7.6-fixed-extraction',
         'session_cache_size': len(session_cache)
     })
 
