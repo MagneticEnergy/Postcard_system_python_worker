@@ -186,7 +186,8 @@ async def scrape_with_playwright(url):
         'title': '',
         'hero_images': [],
         'hero_image_count': 0,
-        'screenshot_base64': ''
+        'screenshot_base64': '',
+        'debug_info': {}  # Add debug info
     }
 
     # Generate unique session ID for IP rotation
@@ -236,6 +237,63 @@ async def scrape_with_playwright(url):
             current_url = page.url
             print(f"Current URL: {current_url}")
 
+            
+        # Run debug JavaScript first
+        debug_js = """
+            () => {
+                const debug = {};
+
+                // Count all images
+                const allImgs = document.querySelectorAll('img');
+                debug.total_img_tags = allImgs.length;
+
+                // Get first 5 img srcs
+                debug.sample_img_srcs = [];
+                allImgs.forEach((img, i) => {
+                    if (i < 5) {
+                        debug.sample_img_srcs.push({
+                            src: img.src?.substring(0, 100),
+                            currentSrc: img.currentSrc?.substring(0, 100),
+                            width: img.getBoundingClientRect().width,
+                            height: img.getBoundingClientRect().height,
+                            top: img.getBoundingClientRect().top
+                        });
+                    }
+                });
+
+                // Count pictures
+                debug.total_picture_tags = document.querySelectorAll('picture').length;
+
+                // Check for Redfin-specific elements
+                debug.redfin_photo_elements = document.querySelectorAll('[class*="photo"], [class*="Photo"]').length;
+                debug.redfin_media_elements = document.querySelectorAll('[class*="media"], [class*="Media"]').length;
+
+                // Get hero area HTML sample
+                const heroArea = document.querySelector('.HomeViews, .PhotosView, [data-rf-test-id*="photo"]');
+                debug.hero_area_found = !!heroArea;
+                if (heroArea) {
+                    debug.hero_area_html = heroArea.outerHTML.substring(0, 500);
+                }
+
+                // Check for any elements with background images in top 800px
+                let bgImageCount = 0;
+                document.querySelectorAll('*').forEach(el => {
+                    const rect = el.getBoundingClientRect();
+                    if (rect.top < 800) {
+                        const style = window.getComputedStyle(el);
+                        if (style.backgroundImage && style.backgroundImage !== 'none') {
+                            bgImageCount++;
+                        }
+                    }
+                });
+                debug.bg_images_in_hero = bgImageCount;
+
+                return debug;
+            }
+        """
+        result['debug_info'] = await page.evaluate(debug_js)
+        print(f"Debug info: {result['debug_info']}")
+
             # Extract hero images
             result['hero_images'] = await extract_hero_images(page)
             result['hero_image_count'] = len(result['hero_images'])
@@ -283,7 +341,7 @@ async def scrape_with_playwright(url):
 def health():
     return jsonify({
         'status': 'healthy',
-        'version': '7.6-fixed-extraction',
+        'version': '7.7-debug',
         'session_cache_size': len(session_cache)
     })
 
