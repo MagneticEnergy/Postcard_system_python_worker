@@ -270,10 +270,9 @@ def scrape():
     if not url:
         return jsonify({'error': 'URL is required'}), 400
 
-    print(f"
-{'='*60}")
+    print("\n" + "="*60)
     print(f"SCRAPING: {url}")
-    print(f"{'='*60}")
+    print("="*60)
 
     try:
         loop = asyncio.new_event_loop()
