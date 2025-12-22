@@ -32,10 +32,12 @@ async def extract_hero_images(page):
 
     try:
         # Wait for page to be fully loaded
-        await page.wait_for_load_state('networkidle', timeout=30000)
+        # Skip networkidle - it hangs on complex pages like Redfin
+        # Just wait for DOM to be ready and give images time to load
+        await page.wait_for_load_state('domcontentloaded', timeout=15000)
 
         # Additional wait for lazy-loaded images
-        await asyncio.sleep(3)
+        await asyncio.sleep(2)  # Reduced from 3s
 
         # Scroll down slightly to trigger lazy loading, then back up
         await page.evaluate('window.scrollTo(0, 500)')
@@ -290,7 +292,7 @@ async def scrape_with_playwright(url):
 def health():
     return jsonify({
         'status': 'healthy',
-        'version': '7.11-debug-fix',
+        'version': '7.12-no-networkidle',
         'session_cache_size': len(session_cache)
     })
 
