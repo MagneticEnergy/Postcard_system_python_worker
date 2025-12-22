@@ -9,7 +9,8 @@ import os
 app = Flask(__name__)
 
 # Version
-VERSION = "7.14-force-rebuild"
+VERSION = "7.15-startup-log"
+print(f"=== STARTING WORKER VERSION {VERSION} ===")
 
 # Session cache - cleared at start of each /scrape request
 # Can be used within same request for retries
