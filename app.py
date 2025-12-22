@@ -158,7 +158,7 @@ async def scrape_with_playwright(url):
     session_id = f"session_{int(time.time() * 1000)}_{hashlib.md5(url.encode()).hexdigest()[:8]}"
     proxy_user_with_session = f"{PROXY_USER}-session-{session_id}"
 
-    max_retries = 3
+    max_retries = 5
 
     for attempt in range(max_retries):
         browser = None
@@ -190,7 +190,7 @@ async def scrape_with_playwright(url):
             page = await context.new_page()
 
             # Navigate with timeout
-            timeout = 120000 if attempt == 0 else 90000
+            timeout = 60000 if attempt == 0 else 45000
             await page.goto(url, wait_until='domcontentloaded', timeout=timeout)
 
             # Get title
@@ -249,7 +249,7 @@ async def scrape_with_playwright(url):
 def health():
     return jsonify({
         'status': 'healthy',
-        'version': '7.2-longer-timeout',
+        'version': '7.3-5retries',
         'session_cache_size': len(session_cache)
     })
 
