@@ -8,6 +8,9 @@ import os
 
 app = Flask(__name__)
 
+# Version
+VERSION = "7.13-cache-bust"
+
 # Session cache - cleared at start of each /scrape request
 # Can be used within same request for retries
 session_cache = {}
@@ -15,8 +18,15 @@ session_cache = {}
 # Bright Data Web Unlocker proxy configuration
 PROXY_HOST = "brd.superproxy.io"
 PROXY_PORT = 33335
-PROXY_USER = "brd-customer-hl_ead19305-zone-web_unlocker1"
+PROXY_USER_BASE = "brd-customer-hl_ead19305-zone-web_unlocker1"
 PROXY_PASS = "9bra6mx0xptc"
+
+def get_proxy_user():
+    """Generate unique proxy user with session ID to bypass cache"""
+    import uuid
+    session_id = str(uuid.uuid4())[:8]
+    # Add session ID to force fresh IP and bypass any caching
+    return f"{PROXY_USER_BASE}-session-{session_id}"
 
 
 def clear_session():
@@ -196,9 +206,7 @@ async def scrape_with_playwright(url):
         'screenshot_base64': ''
     }
 
-    # Generate unique session ID for IP rotation
-    session_id = f"session_{int(time.time() * 1000)}_{hashlib.md5(url.encode()).hexdigest()[:8]}"
-    proxy_user_with_session = f"{PROXY_USER}-country-us-session-{session_id}"
+    # Session ID is now generated fresh for each attempt by get_proxy_user()
 
     max_retries = 10
 
@@ -207,7 +215,7 @@ async def scrape_with_playwright(url):
         playwright = None
         try:
             print(f"Attempt {attempt + 1}/{max_retries} for {url}")
-            print(f"Using session: {session_id}")
+            # Session ID is generated fresh for each proxy connection
 
             playwright = await async_playwright().start()
 
@@ -220,7 +228,7 @@ async def scrape_with_playwright(url):
             context = await browser.new_context(
                 proxy={
                     "server": f"http://{PROXY_HOST}:{PROXY_PORT}",
-                    "username": proxy_user_with_session,
+                    "username": get_proxy_user(),  # Fresh session ID each time
                     "password": PROXY_PASS
                 },
                 viewport={'width': 1920, 'height': 1080},
@@ -280,7 +288,7 @@ async def scrape_with_playwright(url):
             if attempt < max_retries - 1:
                 # New session ID for retry (new IP)
                 session_id = f"session_{int(time.time() * 1000)}_{attempt}_{hashlib.md5(url.encode()).hexdigest()[:8]}"
-                proxy_user_with_session = f"{PROXY_USER}-country-us-session-{session_id}"
+                proxy_user_with_session = f"{PROXY_USER_BASE}-country-us-session-{session_id}"
                 await asyncio.sleep(2)
             else:
                 result['error'] = str(e)
