@@ -190,7 +190,7 @@ async def scrape_with_playwright(url):
             page = await context.new_page()
 
             # Navigate with timeout
-            timeout = 60000 if attempt == 0 else 45000
+            timeout = 120000 if attempt == 0 else 90000
             await page.goto(url, wait_until='domcontentloaded', timeout=timeout)
 
             # Get title
@@ -249,7 +249,7 @@ async def scrape_with_playwright(url):
 def health():
     return jsonify({
         'status': 'healthy',
-        'version': '7.1-clear-on-init',
+        'version': '7.2-longer-timeout',
         'session_cache_size': len(session_cache)
     })
 
