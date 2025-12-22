@@ -9,7 +9,7 @@ import os
 app = Flask(__name__)
 
 # Version
-VERSION = "7.18-revert-cache-bust"
+VERSION = "7.19-fix-country-us"
 print(f"=== STARTING WORKER VERSION {VERSION} ===")
 
 # Session cache - cleared at start of each /scrape request
@@ -27,7 +27,8 @@ def get_proxy_user():
     import uuid
     session_id = str(uuid.uuid4())[:8]
     # Add session ID to force fresh IP and bypass any caching
-    return f"{PROXY_USER_BASE}-session-{session_id}"
+    # IMPORTANT: Include -country-us- to ensure US IP (Redfin blocks non-US)
+    return f"{PROXY_USER_BASE}-country-us-session-{session_id}"
 
 
 def clear_session():
