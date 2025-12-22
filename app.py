@@ -172,7 +172,7 @@ async def extract_hero_images(page):
     except Exception as e:
         print(f"Error extracting hero images: {e}")
 
-    return hero_images
+    return hero_images, debug_info
 
 
 async def scrape_with_playwright(url):
@@ -242,7 +242,9 @@ async def scrape_with_playwright(url):
             print(f"Current URL: {current_url}")
 
             # Extract hero images
-            result['hero_images'] = await extract_hero_images(page)
+            hero_images, debug_info = await extract_hero_images(page)
+            result['hero_images'] = hero_images
+            result['debug_info'] = debug_info
             result['hero_image_count'] = len(result['hero_images'])
 
             # ALWAYS capture screenshot for debugging
@@ -288,7 +290,7 @@ async def scrape_with_playwright(url):
 def health():
     return jsonify({
         'status': 'healthy',
-        'version': '7.10-aggressive-extract',
+        'version': '7.11-debug-fix',
         'session_cache_size': len(session_cache)
     })
 
