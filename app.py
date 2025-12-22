@@ -194,7 +194,7 @@ async def scrape_with_playwright(url):
 
     # Generate unique session ID for IP rotation
     session_id = f"session_{int(time.time() * 1000)}_{hashlib.md5(url.encode()).hexdigest()[:8]}"
-    proxy_user_with_session = f"{PROXY_USER}-session-{session_id}"
+    proxy_user_with_session = f"{PROXY_USER}-country-us-session-{session_id}"
 
     max_retries = 10
 
@@ -274,7 +274,7 @@ async def scrape_with_playwright(url):
             if attempt < max_retries - 1:
                 # New session ID for retry (new IP)
                 session_id = f"session_{int(time.time() * 1000)}_{attempt}_{hashlib.md5(url.encode()).hexdigest()[:8]}"
-                proxy_user_with_session = f"{PROXY_USER}-session-{session_id}"
+                proxy_user_with_session = f"{PROXY_USER}-country-us-session-{session_id}"
                 await asyncio.sleep(2)
             else:
                 result['error'] = str(e)
@@ -286,7 +286,7 @@ async def scrape_with_playwright(url):
 def health():
     return jsonify({
         'status': 'healthy',
-        'version': '7.8-debug-info',
+        'version': '7.9-country-us',
         'session_cache_size': len(session_cache)
     })
 
