@@ -15,8 +15,8 @@ session_cache = {}
 # Bright Data Web Unlocker proxy configuration
 PROXY_HOST = "brd.superproxy.io"
 PROXY_PORT = 33335
-PROXY_USER = "brd-customer-hl_4a5b1fca-zone-web_unlocker1"
-PROXY_PASS = "8g8gj5dnz8zy"
+PROXY_USER = "brd-customer-hl_ead19305-zone-web_unlocker1"
+PROXY_PASS = "9bra6mx0xptc"
 
 
 def clear_session():
