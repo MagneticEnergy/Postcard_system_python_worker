@@ -248,7 +248,7 @@ async def scrape_with_playwright(url):
 def health():
     return jsonify({
         'status': 'healthy',
-        'version': '7.4-10retries',
+        'version': '7.5-fixed-creds',
         'session_cache_size': len(session_cache)
     })
 
