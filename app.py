@@ -46,7 +46,7 @@ async def extract_hero_images(page):
         # JavaScript to extract images from hero area
         js_code = """
             () => {
-                const heroHeight = 800;  // Increased from 700
+                const heroHeight = 800;
                 const images = [];
                 const seenUrls = new Set();
                 const debug = [];
@@ -56,28 +56,34 @@ async def extract_hero_images(page):
                     if (!url.startsWith('http')) return;
                     if (url.includes('logo') || url.includes('icon') || url.includes('avatar')) return;
                     if (url.includes('sprite') || url.includes('placeholder')) return;
-                    // Reduced minimum size to catch more images
                     if (width < 50 || height < 50) return;
 
                     seenUrls.add(url);
                     images.push({ url, width, height, top, source });
                 };
 
-                // Count all elements for debugging
+                // Debug: Count all elements
                 debug.push('Total img tags: ' + document.querySelectorAll('img').length);
                 debug.push('Total picture tags: ' + document.querySelectorAll('picture').length);
 
-                // Method 1: Standard img tags - check ALL attributes
+                // Debug: Find ALL img tags and log their details
+                const allImgs = document.querySelectorAll('img');
+                debug.push('First 10 img details:');
+                allImgs.forEach((img, i) => {
+                    if (i < 10) {
+                        const rect = img.getBoundingClientRect();
+                        debug.push(`  img[${i}]: src=${img.src?.substring(0,50)}, top=${rect.top.toFixed(0)}, w=${rect.width.toFixed(0)}, h=${rect.height.toFixed(0)}`);
+                    }
+                });
+
+                // Method 1: Standard img tags
                 document.querySelectorAll('img').forEach((img) => {
                     const rect = img.getBoundingClientRect();
-                    // Check multiple possible sources
                     const possibleSrcs = [
                         img.src,
                         img.currentSrc,
                         img.dataset.src,
                         img.getAttribute('data-src'),
-                        img.getAttribute('data-lazy-src'),
-                        img.getAttribute('data-original'),
                         img.srcset ? img.srcset.split(',')[0].trim().split(' ')[0] : null
                     ].filter(Boolean);
 
@@ -87,26 +93,32 @@ async def extract_hero_images(page):
                     }
                 });
 
-                // Method 2: Background images
+                // Method 2: Background images - check ALL elements in hero area
+                debug.push('Checking background images...');
+                let bgCount = 0;
                 document.querySelectorAll('*').forEach((el) => {
                     const rect = el.getBoundingClientRect();
                     if (rect.top < heroHeight && rect.width > 100 && rect.height > 80) {
                         const style = window.getComputedStyle(el);
                         const bgImage = style.backgroundImage;
-                        if (bgImage && bgImage !== 'none' && bgImage.includes('url')) {
+                        if (bgImage && bgImage !== 'none' && bgImage.includes('url(')) {
+                            bgCount++;
                             const urlMatch = bgImage.match(/url\(["']?([^"')]+)["']?\)/);
-                            if (urlMatch) {
+                            if (urlMatch && urlMatch[1]) {
+                                if (bgCount <= 5) {
+                                    debug.push(`  bg[${bgCount}]: ${urlMatch[1].substring(0,60)}`);
+                                }
                                 addImage(urlMatch[1], rect.width, rect.height, rect.top, 'background');
                             }
                         }
                     }
                 });
+                debug.push('Total background images found: ' + bgCount);
 
-                // Method 3: Picture/source elements with srcset
+                // Method 3: Picture/source elements
                 document.querySelectorAll('picture').forEach((picture) => {
                     const rect = picture.getBoundingClientRect();
                     if (rect.top < heroHeight) {
-                        // Check source elements
                         picture.querySelectorAll('source').forEach((source) => {
                             const srcset = source.srcset;
                             if (srcset) {
@@ -114,7 +126,6 @@ async def extract_hero_images(page):
                                 addImage(src, rect.width || 300, rect.height || 200, rect.top, 'picture_source');
                             }
                         });
-                        // Check img inside picture
                         const img = picture.querySelector('img');
                         if (img) {
                             const src = img.currentSrc || img.src;
@@ -123,40 +134,31 @@ async def extract_hero_images(page):
                     }
                 });
 
-                // Method 4: Redfin-specific selectors
-                document.querySelectorAll('[class*="photo"], [class*="Photo"], [class*="image"], [class*="Image"], [class*="media"], [class*="Media"], [class*="gallery"], [class*="Gallery"]').forEach((el) => {
-                    const rect = el.getBoundingClientRect();
-                    if (rect.top < heroHeight) {
-                        const img = el.querySelector('img');
-                        if (img) {
-                            const src = img.currentSrc || img.src || img.dataset.src;
-                            if (src) addImage(src, rect.width, rect.height, rect.top, 'photo_class');
-                        }
-                        // Also check for background image on the element itself
-                        const style = window.getComputedStyle(el);
-                        const bgImage = style.backgroundImage;
-                        if (bgImage && bgImage !== 'none' && bgImage.includes('url')) {
-                            const urlMatch = bgImage.match(/url\(["']?([^"')]+)["']?\)/);
-                            if (urlMatch) {
-                                addImage(urlMatch[1], rect.width, rect.height, rect.top, 'photo_class_bg');
-                            }
-                        }
+                // Method 4: Redfin-specific - look for their photo containers
+                debug.push('Checking Redfin-specific selectors...');
+                const redfinSelectors = [
+                    '.HomeViews img',
+                    '.PhotosView img', 
+                    '[data-rf-test-id="gallery-photo"] img',
+                    '.MediaGallery img',
+                    '.photo-carousel img',
+                    '.listing-hero img',
+                    '.hero-image img',
+                    '.main-photo img'
+                ];
+                redfinSelectors.forEach(selector => {
+                    const els = document.querySelectorAll(selector);
+                    if (els.length > 0) {
+                        debug.push(`  ${selector}: ${els.length} found`);
+                        els.forEach(img => {
+                            const rect = img.getBoundingClientRect();
+                            const src = img.currentSrc || img.src;
+                            if (src) addImage(src, rect.width, rect.height, rect.top, 'redfin_specific');
+                        });
                     }
                 });
 
-                // Method 5: Check for Redfin's specific image container
-                document.querySelectorAll('[data-rf-test-id*="photo"], [data-rf-test-id*="image"], .HomeViews, .PhotosView, .MediaGallery').forEach((el) => {
-                    const imgs = el.querySelectorAll('img');
-                    imgs.forEach((img) => {
-                        const rect = img.getBoundingClientRect();
-                        const src = img.currentSrc || img.src;
-                        if (src) addImage(src, rect.width, rect.height, rect.top, 'redfin_specific');
-                    });
-                });
-
-                debug.push('Images found: ' + images.length);
-                console.log('Debug:', debug);
-
+                debug.push('Total images extracted: ' + images.length);
                 return { images: images, debug: debug };
             }
         """
@@ -286,7 +288,7 @@ async def scrape_with_playwright(url):
 def health():
     return jsonify({
         'status': 'healthy',
-        'version': '7.9-country-us',
+        'version': '7.10-aggressive-extract',
         'session_cache_size': len(session_cache)
     })
 
