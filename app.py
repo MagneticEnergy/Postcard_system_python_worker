@@ -9,7 +9,7 @@ import os
 app = Flask(__name__)
 
 # Version
-VERSION = "7.17-url-cache-bust"
+VERSION = "7.18-revert-cache-bust"
 print(f"=== STARTING WORKER VERSION {VERSION} ===")
 
 # Session cache - cleared at start of each /scrape request
@@ -242,16 +242,7 @@ async def scrape_with_playwright(url):
 
             # Navigate with timeout
             timeout = 60000 if attempt == 0 else 45000
-            # Add cache-busting parameter to URL
-            import urllib.parse
-            cache_bust = f"_cb={int(time.time() * 1000)}"
-            if '?' in url:
-                cache_busted_url = f"{url}&{cache_bust}"
-            else:
-                cache_busted_url = f"{url}?{cache_bust}"
-            print(f"Cache-busted URL: {cache_busted_url}")
-
-            await page.goto(cache_busted_url, wait_until='domcontentloaded', timeout=timeout)
+            await page.goto(url, wait_until='domcontentloaded', timeout=timeout)
 
             # Get title
             result['title'] = await page.title()
