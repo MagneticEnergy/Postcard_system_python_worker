@@ -205,10 +205,9 @@ async def scrape_with_playwright(url):
             result['hero_images'] = await extract_hero_images(page)
             result['hero_image_count'] = len(result['hero_images'])
 
-            # Capture screenshot if no images found
-            if result['hero_image_count'] == 0:
-                screenshot = await page.screenshot(type='png', full_page=False)
-                result['screenshot_base64'] = base64.b64encode(screenshot).decode('utf-8')
+            # ALWAYS capture screenshot for debugging
+            screenshot = await page.screenshot(type='png', full_page=False)
+            result['screenshot_base64'] = base64.b64encode(screenshot).decode('utf-8')
 
             result['success'] = True
 
