@@ -1,20 +1,22 @@
 from flask import Flask, request, jsonify
+from playwright.async_api import async_playwright
 import asyncio
 import hashlib
 import time
 import base64
-from playwright.async_api import async_playwright
+import os
 
 app = Flask(__name__)
 
-# Version
-VERSION = "8.0-scraping-browser"
-
-# BrightData Scraping Browser endpoint (real browser, no caching issues)
-SCRAPING_BROWSER_WS = "wss://brd-customer-hl_ead19305-zone-scraping_browser1:f25aiw90s21r@brd.superproxy.io:9222"
-
-# Session cache for within-request caching only
+# Session cache - cleared at start of each /scrape request
+# Can be used within same request for retries
 session_cache = {}
+
+# Bright Data Web Unlocker proxy configuration
+PROXY_HOST = "brd.superproxy.io"
+PROXY_PORT = 33335
+PROXY_USER = "brd-customer-hl_ead19305-zone-web_unlocker1"
+PROXY_PASS = "9bra6mx0xptc"
 
 
 def clear_session():
@@ -29,82 +31,161 @@ async def extract_hero_images(page):
     hero_images = []
 
     try:
-        # Wait for images to load
-        await page.wait_for_load_state('domcontentloaded')
-        await asyncio.sleep(2)  # Give time for lazy-loaded images
+        # Wait for page to be fully loaded
+        # Skip networkidle - it hangs on complex pages like Redfin
+        # Just wait for DOM to be ready and give images time to load
+        await page.wait_for_load_state('domcontentloaded', timeout=15000)
 
-        # Get viewport height for hero area calculation
-        hero_height = 700
+        # Additional wait for lazy-loaded images
+        await asyncio.sleep(2)  # Reduced from 3s
 
-        # Extract images using JavaScript
-        images = await page.evaluate(f'''() => {{
-            const heroHeight = {hero_height};
-            const images = [];
+        # Scroll down slightly to trigger lazy loading, then back up
+        await page.evaluate('window.scrollTo(0, 500)')
+        await asyncio.sleep(1)
+        await page.evaluate('window.scrollTo(0, 0)')
+        await asyncio.sleep(2)
 
-            // Get all img elements
-            document.querySelectorAll('img').forEach(img => {{
-                const rect = img.getBoundingClientRect();
-                const src = img.src || img.dataset.src || img.getAttribute('data-lazy-src');
+        # JavaScript to extract images from hero area
+        js_code = """
+            () => {
+                const heroHeight = 800;
+                const images = [];
+                const seenUrls = new Set();
+                const debug = [];
 
-                // Only include images in hero area (top portion of page)
-                if (rect.top < heroHeight && src && src.startsWith('http')) {{
-                    // Filter out tiny images, icons, logos
-                    if (rect.width > 100 && rect.height > 100) {{
-                        images.push({{
-                            url: src,
-                            width: rect.width,
-                            height: rect.height,
-                            top: rect.top,
-                            alt: img.alt || ''
-                        }});
-                    }}
-                }}
-            }});
+                const addImage = (url, width, height, top, source) => {
+                    if (!url || seenUrls.has(url)) return;
+                    if (!url.startsWith('http')) return;
+                    if (url.includes('logo') || url.includes('icon') || url.includes('avatar')) return;
+                    if (url.includes('sprite') || url.includes('placeholder')) return;
+                    if (width < 50 || height < 50) return;
 
-            // Also check for background images in hero area
-            document.querySelectorAll('div, section, header').forEach(el => {{
-                const rect = el.getBoundingClientRect();
-                if (rect.top < heroHeight) {{
-                    const style = window.getComputedStyle(el);
-                    const bgImage = style.backgroundImage;
-                    if (bgImage && bgImage !== 'none' && bgImage.includes('url(')) {{
-                        const match = bgImage.match(/url\(["']?([^"')]+)["']?\)/);
-                        if (match && match[1] && match[1].startsWith('http')) {{
-                            images.push({{
-                                url: match[1],
-                                width: rect.width,
-                                height: rect.height,
-                                top: rect.top,
-                                alt: 'background-image',
-                                source: 'background'
-                            }});
-                        }}
-                    }}
-                }}
-            }});
+                    seenUrls.add(url);
+                    images.push({ url, width, height, top, source });
+                };
 
-            return images;
-        }}''')
+                // Debug: Count all elements
+                debug.push('Total img tags: ' + document.querySelectorAll('img').length);
+                debug.push('Total picture tags: ' + document.querySelectorAll('picture').length);
 
-        # Sort by position (top first) and deduplicate
-        seen_urls = set()
-        for img in sorted(images, key=lambda x: x.get('top', 0)):
-            url = img.get('url', '')
-            if url and url not in seen_urls:
-                seen_urls.add(url)
-                hero_images.append(img)
+                // Debug: Find ALL img tags and log their details
+                const allImgs = document.querySelectorAll('img');
+                debug.push('First 10 img details:');
+                allImgs.forEach((img, i) => {
+                    if (i < 10) {
+                        const rect = img.getBoundingClientRect();
+                        debug.push(`  img[${i}]: src=${img.src?.substring(0,50)}, top=${rect.top.toFixed(0)}, w=${rect.width.toFixed(0)}, h=${rect.height.toFixed(0)}`);
+                    }
+                });
 
-        print(f"Found {len(hero_images)} hero images")
+                // Method 1: Standard img tags
+                document.querySelectorAll('img').forEach((img) => {
+                    const rect = img.getBoundingClientRect();
+                    const possibleSrcs = [
+                        img.src,
+                        img.currentSrc,
+                        img.dataset.src,
+                        img.getAttribute('data-src'),
+                        img.srcset ? img.srcset.split(',')[0].trim().split(' ')[0] : null
+                    ].filter(Boolean);
+
+                    if (rect.top < heroHeight && possibleSrcs.length > 0) {
+                        const src = possibleSrcs[0];
+                        addImage(src, rect.width, rect.height, rect.top, 'img_tag');
+                    }
+                });
+
+                // Method 2: Background images - check ALL elements in hero area
+                debug.push('Checking background images...');
+                let bgCount = 0;
+                document.querySelectorAll('*').forEach((el) => {
+                    const rect = el.getBoundingClientRect();
+                    if (rect.top < heroHeight && rect.width > 100 && rect.height > 80) {
+                        const style = window.getComputedStyle(el);
+                        const bgImage = style.backgroundImage;
+                        if (bgImage && bgImage !== 'none' && bgImage.includes('url(')) {
+                            bgCount++;
+                            const urlMatch = bgImage.match(/url\(["']?([^"')]+)["']?\)/);
+                            if (urlMatch && urlMatch[1]) {
+                                if (bgCount <= 5) {
+                                    debug.push(`  bg[${bgCount}]: ${urlMatch[1].substring(0,60)}`);
+                                }
+                                addImage(urlMatch[1], rect.width, rect.height, rect.top, 'background');
+                            }
+                        }
+                    }
+                });
+                debug.push('Total background images found: ' + bgCount);
+
+                // Method 3: Picture/source elements
+                document.querySelectorAll('picture').forEach((picture) => {
+                    const rect = picture.getBoundingClientRect();
+                    if (rect.top < heroHeight) {
+                        picture.querySelectorAll('source').forEach((source) => {
+                            const srcset = source.srcset;
+                            if (srcset) {
+                                const src = srcset.split(',')[0].trim().split(' ')[0];
+                                addImage(src, rect.width || 300, rect.height || 200, rect.top, 'picture_source');
+                            }
+                        });
+                        const img = picture.querySelector('img');
+                        if (img) {
+                            const src = img.currentSrc || img.src;
+                            addImage(src, rect.width || 300, rect.height || 200, rect.top, 'picture_img');
+                        }
+                    }
+                });
+
+                // Method 4: Redfin-specific - look for their photo containers
+                debug.push('Checking Redfin-specific selectors...');
+                const redfinSelectors = [
+                    '.HomeViews img',
+                    '.PhotosView img', 
+                    '[data-rf-test-id="gallery-photo"] img',
+                    '.MediaGallery img',
+                    '.photo-carousel img',
+                    '.listing-hero img',
+                    '.hero-image img',
+                    '.main-photo img'
+                ];
+                redfinSelectors.forEach(selector => {
+                    const els = document.querySelectorAll(selector);
+                    if (els.length > 0) {
+                        debug.push(`  ${selector}: ${els.length} found`);
+                        els.forEach(img => {
+                            const rect = img.getBoundingClientRect();
+                            const src = img.currentSrc || img.src;
+                            if (src) addImage(src, rect.width, rect.height, rect.top, 'redfin_specific');
+                        });
+                    }
+                });
+
+                debug.push('Total images extracted: ' + images.length);
+                return { images: images, debug: debug };
+            }
+        """
+
+        js_result = await page.evaluate(js_code)
+        hero_images = js_result.get('images', []) if isinstance(js_result, dict) else js_result
+        debug_info = js_result.get('debug', []) if isinstance(js_result, dict) else []
+        print(f"DEBUG INFO: {debug_info}")
+        print(f"Extracted {len(hero_images)} hero images")
 
     except Exception as e:
         print(f"Error extracting hero images: {e}")
 
-    return hero_images[:8]  # Limit to 8 images
+    return hero_images, debug_info
 
 
 async def scrape_with_playwright(url):
-    """Scrape a URL using Playwright with BrightData Scraping Browser"""
+    """Scrape a URL using Playwright with Bright Data proxy"""
     global session_cache
+
+    # Check session cache (for retries within same request)
+    cache_key = hashlib.md5(url.encode()).hexdigest()
+    if cache_key in session_cache:
+        print(f"Using session cache for {url}")
+        return session_cache[cache_key]
 
     result = {
         'success': False,
@@ -115,65 +196,76 @@ async def scrape_with_playwright(url):
         'screenshot_base64': ''
     }
 
-    max_retries = 5
-    browser = None
-    playwright = None
+    # Generate unique session ID for IP rotation
+    session_id = f"session_{int(time.time() * 1000)}_{hashlib.md5(url.encode()).hexdigest()[:8]}"
+    proxy_user_with_session = f"{PROXY_USER}-country-us-session-{session_id}"
+
+    max_retries = 10
 
     for attempt in range(max_retries):
+        browser = None
+        playwright = None
         try:
             print(f"Attempt {attempt + 1}/{max_retries} for {url}")
-            print(f"Connecting to BrightData Scraping Browser...")
+            print(f"Using session: {session_id}")
 
             playwright = await async_playwright().start()
 
-            # Connect to BrightData's Scraping Browser via CDP
-            browser = await playwright.chromium.connect_over_cdp(
-                SCRAPING_BROWSER_WS,
-                timeout=60000
+            browser = await playwright.chromium.launch(
+                headless=True,
+                args=['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
             )
 
-            print("Connected to Scraping Browser!")
+            # Create FRESH context - no cookies, no cache
+            context = await browser.new_context(
+                proxy={
+                    "server": f"http://{PROXY_HOST}:{PROXY_PORT}",
+                    "username": proxy_user_with_session,
+                    "password": PROXY_PASS
+                },
+                viewport={'width': 1920, 'height': 1080},
+                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                bypass_csp=True,
+                ignore_https_errors=True
+            )
 
-            # Get the default context and page
-            context = browser.contexts[0] if browser.contexts else await browser.new_context()
-            page = context.pages[0] if context.pages else await context.new_page()
+            page = await context.new_page()
 
-            # Navigate to the URL
-            print(f"Navigating to {url}...")
-            await page.goto(url, wait_until='domcontentloaded', timeout=60000)
+            # Navigate with timeout
+            timeout = 60000 if attempt == 0 else 45000
+            await page.goto(url, wait_until='domcontentloaded', timeout=timeout)
 
-            # Wait for content to load
-            await asyncio.sleep(3)
-
-            # Get page title
+            # Get title
             result['title'] = await page.title()
             print(f"Page title: {result['title']}")
 
-            # Capture screenshot
-            try:
-                screenshot_bytes = await page.screenshot(type='png', full_page=False)
-                result['screenshot_base64'] = base64.b64encode(screenshot_bytes).decode('utf-8')
-                print("Screenshot captured")
-            except Exception as e:
-                print(f"Screenshot failed: {e}")
+            # Verify we're on the right page
+            current_url = page.url
+            print(f"Current URL: {current_url}")
 
             # Extract hero images
-            result['hero_images'] = await extract_hero_images(page)
+            hero_images, debug_info = await extract_hero_images(page)
+            result['hero_images'] = hero_images
+            result['debug_info'] = debug_info
             result['hero_image_count'] = len(result['hero_images'])
+
+            # ALWAYS capture screenshot for debugging
+            screenshot = await page.screenshot(type='png', full_page=False)
+            result['screenshot_base64'] = base64.b64encode(screenshot).decode('utf-8')
+
             result['success'] = True
 
-            print(f"Successfully extracted {result['hero_image_count']} images")
-            break
+            # Cache for this session (in case of retries)
+            session_cache[cache_key] = result
+
+            await context.close()
+            await browser.close()
+            await playwright.stop()
+
+            return result
 
         except Exception as e:
             print(f"Attempt {attempt + 1} failed: {e}")
-            if attempt < max_retries - 1:
-                print(f"Retrying in 2 seconds...")
-                await asyncio.sleep(2)
-            else:
-                result['error'] = str(e)
-
-        finally:
             if browser:
                 try:
                     await browser.close()
@@ -185,6 +277,14 @@ async def scrape_with_playwright(url):
                 except:
                     pass
 
+            if attempt < max_retries - 1:
+                # New session ID for retry (new IP)
+                session_id = f"session_{int(time.time() * 1000)}_{attempt}_{hashlib.md5(url.encode()).hexdigest()[:8]}"
+                proxy_user_with_session = f"{PROXY_USER}-country-us-session-{session_id}"
+                await asyncio.sleep(2)
+            else:
+                result['error'] = str(e)
+
     return result
 
 
@@ -192,38 +292,48 @@ async def scrape_with_playwright(url):
 def health():
     return jsonify({
         'status': 'healthy',
-        'version': VERSION,
+        'version': '7.12-no-networkidle',
         'session_cache_size': len(session_cache)
     })
 
 
 @app.route('/scrape', methods=['POST'])
 def scrape():
-    """Main scrape endpoint"""
-    # Clear session at start of each request
+    """Main scrape endpoint - CLEARS CACHE AT START"""
+
+    # ========================================
+    # STEP 1: CLEAR ALL CACHE/SESSION DATA
+    # This is the FIRST thing we do!
+    # ========================================
     clear_session()
 
     data = request.get_json()
-    url = data.get('url', '')
+    url = data.get('url')
 
     if not url:
-        return jsonify({'error': 'No URL provided', 'success': False}), 400
+        return jsonify({'error': 'URL is required'}), 400
 
-    print(f"
-{'='*60}")
-    print(f"SCRAPE REQUEST: {url}")
-    print(f"{'='*60}")
+    print("\n" + "="*60)
+    print(f"SCRAPING: {url}")
+    print("="*60)
 
-    # Run the async scrape
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
     try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
         result = loop.run_until_complete(scrape_with_playwright(url))
-    finally:
         loop.close()
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({'error': str(e), 'success': False}), 500
 
-    return jsonify(result)
+
+@app.route('/clear_cache', methods=['POST'])
+def clear_cache():
+    """Manual cache clear endpoint"""
+    clear_session()
+    return jsonify({'status': 'session cleared', 'success': True})
 
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port)
