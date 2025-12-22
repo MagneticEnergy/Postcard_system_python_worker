@@ -8,11 +8,22 @@ import os
 
 app = Flask(__name__)
 
+# Session cache - cleared at start of each /scrape request
+# Can be used within same request for retries
+session_cache = {}
+
 # Bright Data Web Unlocker proxy configuration
 PROXY_HOST = "brd.superproxy.io"
 PROXY_PORT = 33335
 PROXY_USER = "brd-customer-hl_4a5b1fca-zone-web_unlocker1"
 PROXY_PASS = "8g8gj5dnz8zy"
+
+
+def clear_session():
+    """Clear all cached data - called at START of each request"""
+    global session_cache
+    session_cache = {}
+    print("🧹 SESSION CLEARED - Starting fresh")
 
 
 async def extract_hero_images(page):
@@ -125,7 +136,14 @@ async def extract_hero_images(page):
 
 
 async def scrape_with_playwright(url):
-    """Scrape a URL using Playwright with Bright Data proxy - NO CACHING"""
+    """Scrape a URL using Playwright with Bright Data proxy"""
+    global session_cache
+
+    # Check session cache (for retries within same request)
+    cache_key = hashlib.md5(url.encode()).hexdigest()
+    if cache_key in session_cache:
+        print(f"Using session cache for {url}")
+        return session_cache[cache_key]
 
     result = {
         'success': False,
@@ -136,7 +154,7 @@ async def scrape_with_playwright(url):
         'screenshot_base64': ''
     }
 
-    # Generate unique session ID for IP rotation - ALWAYS FRESH
+    # Generate unique session ID for IP rotation
     session_id = f"session_{int(time.time() * 1000)}_{hashlib.md5(url.encode()).hexdigest()[:8]}"
     proxy_user_with_session = f"{PROXY_USER}-session-{session_id}"
 
@@ -156,7 +174,7 @@ async def scrape_with_playwright(url):
                 args=['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
             )
 
-            # Create FRESH context with NO cache, NO cookies
+            # Create FRESH context - no cookies, no cache
             context = await browser.new_context(
                 proxy={
                     "server": f"http://{PROXY_HOST}:{PROXY_PORT}",
@@ -165,18 +183,11 @@ async def scrape_with_playwright(url):
                 },
                 viewport={'width': 1920, 'height': 1080},
                 user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                # IMPORTANT: Disable all caching
                 bypass_csp=True,
                 ignore_https_errors=True
             )
 
-            # Clear any existing data (extra safety)
-            await context.clear_cookies()
-
             page = await context.new_page()
-
-            # Disable cache at page level
-            await page.route('**/*', lambda route: route.continue_())
 
             # Navigate with timeout
             timeout = 60000 if attempt == 0 else 45000
@@ -186,7 +197,7 @@ async def scrape_with_playwright(url):
             result['title'] = await page.title()
             print(f"Page title: {result['title']}")
 
-            # Verify we're on the right page (URL should match)
+            # Verify we're on the right page
             current_url = page.url
             print(f"Current URL: {current_url}")
 
@@ -194,12 +205,15 @@ async def scrape_with_playwright(url):
             result['hero_images'] = await extract_hero_images(page)
             result['hero_image_count'] = len(result['hero_images'])
 
-            # Capture screenshot if no images found (for debugging)
+            # Capture screenshot if no images found
             if result['hero_image_count'] == 0:
                 screenshot = await page.screenshot(type='png', full_page=False)
                 result['screenshot_base64'] = base64.b64encode(screenshot).decode('utf-8')
 
             result['success'] = True
+
+            # Cache for this session (in case of retries)
+            session_cache[cache_key] = result
 
             await context.close()
             await browser.close()
@@ -235,13 +249,21 @@ async def scrape_with_playwright(url):
 def health():
     return jsonify({
         'status': 'healthy',
-        'version': '7.0-no-cache',
-        'cache': 'DISABLED'
+        'version': '7.1-clear-on-init',
+        'session_cache_size': len(session_cache)
     })
 
 
 @app.route('/scrape', methods=['POST'])
 def scrape():
+    """Main scrape endpoint - CLEARS CACHE AT START"""
+
+    # ========================================
+    # STEP 1: CLEAR ALL CACHE/SESSION DATA
+    # This is the FIRST thing we do!
+    # ========================================
+    clear_session()
+
     data = request.get_json()
     url = data.get('url')
 
@@ -250,7 +272,7 @@ def scrape():
 
     print(f"
 {'='*60}")
-    print(f"SCRAPING (NO CACHE): {url}")
+    print(f"SCRAPING: {url}")
     print(f"{'='*60}")
 
     try:
@@ -265,8 +287,9 @@ def scrape():
 
 @app.route('/clear_cache', methods=['POST'])
 def clear_cache():
-    # No cache to clear anymore, but keep endpoint for compatibility
-    return jsonify({'status': 'cache disabled', 'cleared': 0, 'success': True})
+    """Manual cache clear endpoint"""
+    clear_session()
+    return jsonify({'status': 'session cleared', 'success': True})
 
 
 if __name__ == '__main__':
