@@ -344,6 +344,61 @@ def clear_cache():
     return jsonify({'status': 'session cleared', 'success': True})
 
 
+
+
+
+@app.route('/generate-qr', methods=['POST'])
+def generate_qr():
+    """Generate QR code from URL and return base64 PNG"""
+    import qrcode
+    from PIL import Image
+    import io
+
+    data = request.get_json()
+    url = data.get('url', '')
+    size = data.get('size', 400)
+    border_size = data.get('border_size', 4)
+
+    if not url:
+        return jsonify({"error": "URL is required", "success": False}), 400
+
+    try:
+        # Generate QR code with high error correction for scanning reliability
+        qr = qrcode.QRCode(
+            version=1,
+            error_correction=qrcode.constants.ERROR_CORRECT_H,
+            box_size=10,
+            border=border_size,
+        )
+        qr.add_data(url)
+        qr.make(fit=True)
+
+        # Create image
+        qr_image = qr.make_image(fill_color="black", back_color="white")
+
+        # Resize if needed
+        if size and size > 0:
+            qr_image = qr_image.resize((size, size), Image.Resampling.LANCZOS)
+
+        # Convert to base64
+        buffer = io.BytesIO()
+        qr_image.save(buffer, format="PNG")
+        base64_image = base64.b64encode(buffer.getvalue()).decode('utf-8')
+
+        print(f"✓ Generated QR code for URL: {url[:50]}...")
+
+        return jsonify({
+            "success": True,
+            "qr_image": f"data:image/png;base64,{base64_image}",
+            "qr_url": None,
+            "size": size
+        })
+
+    except Exception as e:
+        print(f"✗ QR generation error: {e}")
+        return jsonify({"error": str(e), "success": False}), 500
+
+
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)

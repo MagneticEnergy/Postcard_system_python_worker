@@ -1,3 +1,5 @@
 flask
 playwright
 gunicorn
+qrcode
+Pillow
