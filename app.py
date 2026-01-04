@@ -402,3 +402,39 @@ def generate_qr():
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
+
+@app.route('/update-highlevel-contact', methods=['POST'])
+def update_highlevel_contact():
+    """Proxy endpoint to update HighLevel contact (bypasses N8N Cloud SSL issues)"""
+    import requests
+
+    data = request.json
+    contact_id = data.get('contact_id')
+    trigger_url = data.get('trigger_url')
+    qr_image = data.get('qr_image')
+    qr_url = data.get('qr_url')
+    neighbor_tag = data.get('neighbor_tag')
+
+    url = f"https://services.leadconnectorhq.com/contacts/{contact_id}"
+
+    headers = {
+        "Authorization": f"Bearer {os.environ.get('HIGHLEVEL_TOKEN', 'pit-b553bc1f-b684-4032-ab89-f5fe5550881d')}",
+        "Content-Type": "application/json",
+        "Version": "2021-07-28",
+        "Location-Id": os.environ.get('HIGHLEVEL_LOCATION_ID', 'Yq94K7p0kFKwcxK4PsJp')
+    }
+
+    payload = {
+        "custom_preview_url_triggerlink": trigger_url,
+        "custom_preview_qr_image": qr_image,
+        "custom_preview_qr_url": qr_url,
+        "tags": [neighbor_tag] if neighbor_tag else []
+    }
+
+    response = requests.put(url, json=payload, headers=headers, timeout=30)
+
+    return {
+        "status": response.status_code,
+        "response": response.json() if response.status_code in [200, 422] else response.text
+    }
+
