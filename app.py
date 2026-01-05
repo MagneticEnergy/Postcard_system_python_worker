@@ -424,14 +424,34 @@ def update_highlevel_contact():
         "Location-Id": os.environ.get('HIGHLEVEL_LOCATION_ID', 'Yq94K7p0kFKwcxK4PsJp')
     }
 
-    payload = {
-        "custom_preview_url_triggerlink": trigger_url,
-        "custom_preview_qr_image": qr_image,
-        "custom_preview_qr_url": qr_url,
-        "tags": [neighbor_tag] if neighbor_tag else []
+    # Custom field IDs from HighLevel
+    field_ids = {
+        "custom_preview_url_triggerlink": "yhS3VdK90AqkuaDzUwbV",
+        "custom_preview_qr_image": "Qx6Tl0WiqtpuaxfnKkhU",
+        "custom_preview_qr_url": "Cy3UNg2N0zTql32AxKo9"
     }
 
-    response = requests.put(url, json=payload, headers=headers, timeout=30)
+    # Build payload with customFields array
+    payload = {
+        "customFields": [
+            {
+                "id": field_ids["custom_preview_url_triggerlink"],
+                "value": trigger_url
+            },
+            {
+                "id": field_ids["custom_preview_qr_image"],
+                "value": qr_image
+            },
+            {
+                "id": field_ids["custom_preview_qr_url"],
+                "value": qr_url
+            }
+        ]
+    }
+
+    # Add tags if neighbor_tag exists
+    if neighbor_tag:
+        payload["tags"] = [neighbor_tag]   response = requests.put(url, json=payload, headers=headers, timeout=30)
 
     return {
         "status": response.status_code,
