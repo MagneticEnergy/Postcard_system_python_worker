@@ -1,3 +1,4 @@
+import os
 from flask import Flask, request, jsonify
 from playwright.async_api import async_playwright
 import asyncio
@@ -451,7 +452,8 @@ def update_highlevel_contact():
 
     # Add tags if neighbor_tag exists
     if neighbor_tag:
-        payload["tags"] = [neighbor_tag]   response = requests.put(url, json=payload, headers=headers, timeout=30)
+        payload["tags"] = [neighbor_tag]
+    response = requests.put(url, json=payload, headers=headers, timeout=30)
 
     return {
         "status": response.status_code,
