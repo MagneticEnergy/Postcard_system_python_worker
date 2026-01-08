@@ -3,3 +3,4 @@ playwright
 gunicorn
 qrcode
 Pillow
+requests
