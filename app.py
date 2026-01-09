@@ -127,7 +127,7 @@ def update_highlevel_contact():
             link_id = link_data.get('link', {}).get('id')
             if link_id:
                 # Construct the short URL format
-                short_trigger_url = f"https://msgsndr.com/widget/trigger-link/{link_id}?contact_id={contact_id}"
+                short_trigger_url = link_data.get("link", {}).get("fieldKey", trigger_url)
                 print(f"Created short trigger link: {short_trigger_url}")
         else:
             print(f"Warning: Could not create trigger link: {link_response.text}")
