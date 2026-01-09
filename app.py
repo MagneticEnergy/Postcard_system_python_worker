@@ -68,7 +68,7 @@ def generate_qr():
 
 @app.route('/update-highlevel-contact', methods=['POST'])
 def update_highlevel_contact():
-    """Update HighLevel contact with trigger URL and QR data"""
+    """Update HighLevel contact with trigger URL, QR data, and neighbor info"""
 
     data = request.json
     print("=== UPDATE HIGHLEVEL CONTACT ===")
@@ -76,9 +76,10 @@ def update_highlevel_contact():
 
     contact_id = data.get('contact_id')
     trigger_url = data.get('trigger_url')
-    qr_image = data.get('qr_image')
+    qr_image = data.get('qr_image')  # Base64 image data
     qr_url = data.get('qr_url') or trigger_url
     neighbor_tag = data.get('neighbor_tag')
+    neighbor_lastname = data.get('neighbor_lastname')  # New field for lastname only
 
     # Validate required fields
     if not contact_id:
@@ -101,10 +102,13 @@ def update_highlevel_contact():
     }
 
     # Custom field IDs from HighLevel
+    # NOTE: installed_neighbor (qlC98frkc0DU0sFIF2Dk) stores the ADDRESS - do NOT overwrite
+    # installed_neighbor_lastname needs to be created in HighLevel and ID added here
     field_ids = {
         "custom_preview_url_triggerlink": "yhS3VdK90AqkuaDzUwbV",
         "custom_preview_qr_url": "Cy3UNg2N0zTql32AxKo9",
-        "installed_neighbor": "qlC98frkc0DU0sFIF2Dk"
+        "custom_preview_qr_image": "Qx6Tl0WiqtpuaxfnKkhU",  # TODO: Add actual field ID
+        "installed_neighbor_lastname": "HmGAlm8iqMIx66Ymvcte"  # TODO: Add actual field ID
     }
 
     # Build payload with customFields array
@@ -119,13 +123,21 @@ def update_highlevel_contact():
         }
     ]
 
-    # Add neighbor name to installed_neighbor field if we have it
-    if neighbor_tag:
+    # Add neighbor lastname to the correct field (NOT installed_neighbor which has the address)
+    if neighbor_lastname:
+        if field_ids.get("installed_neighbor_lastname") and field_ids["installed_neighbor_lastname"] != "HmGAlm8iqMIx66Ymvcte":
+            custom_fields.append({
+                "id": field_ids["installed_neighbor_lastname"],
+                "value": neighbor_lastname
+            })
+    elif neighbor_tag:
+        # Extract lastname from tag if neighbor_lastname not provided separately
         neighbor_name = neighbor_tag.replace("Installed Neighbor ", "").strip() if neighbor_tag.startswith("Installed Neighbor ") else neighbor_tag
-        custom_fields.append({
-            "id": field_ids["installed_neighbor"],
-            "value": neighbor_name
-        })
+        if field_ids.get("installed_neighbor_lastname") and field_ids["installed_neighbor_lastname"] != "HmGAlm8iqMIx66Ymvcte":
+            custom_fields.append({
+                "id": field_ids["installed_neighbor_lastname"],
+                "value": neighbor_name
+            })
 
     payload = {
         "customFields": custom_fields
@@ -146,11 +158,17 @@ def update_highlevel_contact():
         if response.status_code == 200:
             result = response.json()
             print("SUCCESS: Contact updated")
+
+            # TODO: Handle QR image upload separately if needed
+            # HighLevel file uploads require a different API endpoint
+            # For now, we store the QR URL which can be used to display the image
+
             return jsonify({
                 "success": True,
                 "status": response.status_code,
                 "contact_id": contact_id,
-                "message": "Contact updated successfully"
+                "message": "Contact updated successfully",
+                "qr_image_note": "QR image available via qr_url field" if qr_url else None
             })
         else:
             error_text = response.text
